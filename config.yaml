@@ -1,0 +1,42 @@
+﻿project_name: "监测数据分析与报告生成系统 V1"
+
+input:
+  data_dir: "data"
+  site_info_file: "点位信息.xlsx"
+  rainfall_file: "降雨数据.csv"
+  report_template: "监测数据分析报告模板-更新.docx"
+
+output:
+  root_dir: "outputs"
+  charts_dirname: "charts"
+  logs_dirname: "logs"
+  filter_result_file: "筛选结果.xlsx"
+  combined_results_file: "综合分析结果.xlsx"
+  data_analysis_file: "数据分析结果.xlsx"
+  risk_analysis_file: "风险分析表.xlsx"
+  pattern_analysis_file: "排污规律分析表.xlsx"
+  report_file: "报告初稿.docx"
+  risk_summary_file: "风险分析文字.txt"
+  manual_filter_override_file: "筛选结果_人工修正.xlsx"
+  rainfall_analysis_file: "降雨分析结果.xlsx"
+
+analysis:
+  missing_rate_threshold: 0.1
+  expected_rows_per_day: 1440
+  sudden_zero_window_minutes: 360
+  rain_day_filter_threshold: 2.0
+  zero_like_threshold: 0.02
+  high_zero_ratio_threshold: 0.5
+  high_zero_ratio_normal_days_threshold: 5
+  zero_day_drop_min_nonzero_keep_days: 3
+  iqr_factor: 1.5
+  mean_lower_ratio: 0.5
+  mean_upper_ratio: 2.0
+  plot_dpi: 120
+  smooth_window: 30
+
+llm:
+  enabled: true
+  api_key_env: "DEEPSEEK_API_KEY"
+  base_url_env: "DEEPSEEK_BASE_URL"
+  model_name_env: "DEEPSEEK_MODEL"
