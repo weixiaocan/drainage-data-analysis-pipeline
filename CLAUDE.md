@@ -102,6 +102,24 @@ def test_module(tmp_path):
     assert (config.output_dir / "expected_output.xlsx").exists()
 ```
 
+## Phase 完成后推送约定
+
+每个 Phase 完成后，自动将修改推送到 GitHub：
+
+```bash
+# Phase N 完成后执行
+git add .
+git commit -m "feat(phase-N): 完成 Phase N 描述"
+git push origin main
+```
+
+**提交信息格式**：
+- `feat(phase-1): 完成基础设施实现`
+- `feat(phase-2): 完成模块补齐与标准化`
+- `feat(phase-3): 完成 Orchestrator 重构`
+- `feat(phase-4): 完成报告组装修复`
+- `feat(phase-5): 完成清理与验收`
+
 ---
 
 ## 相关文档
