@@ -1,10 +1,10 @@
 ﻿project_name: "监测数据分析与报告生成系统 V1"
 
 input:
-  data_dir: "data"
-  site_info_file: "点位信息.xlsx"
-  rainfall_file: "降雨数据.csv"
-  report_template: "监测数据分析报告模板-更新.docx"
+  data_dir: "data/flow"
+  site_info_file: "data/点位信息.xlsx"
+  rainfall_file: "data/降雨数据.csv"
+  report_template: "templates/监测数据分析报告模板-更新.docx"
 
 output:
   root_dir: "outputs"

@@ -4,7 +4,7 @@ tests/unit/test_llm_client.py - LLMClient 单元测试
 
 import pytest
 from unittest.mock import Mock, patch
-from core import Config, LLMClient, LLMDisabledError, LLMFailedAfterRetry
+from src.core import Config, LLMClient, LLMDisabledError, LLMFailedAfterRetry
 
 
 class TestLLMClientDisabled:

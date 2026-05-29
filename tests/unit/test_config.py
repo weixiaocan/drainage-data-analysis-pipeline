@@ -4,7 +4,7 @@ tests/unit/test_config.py - Config 类单元测试
 
 import pytest
 from pathlib import Path
-from core import Config, ConfigLoadError
+from src.core import Config, ConfigLoadError
 
 
 class TestConfigForTesting:
