@@ -96,7 +96,7 @@ def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
         df["f"] = pd.to_numeric(df["f"], errors="coerce").fillna(0.0)
         df["l"] = pd.to_numeric(df["l"], errors="coerce").fillna(0.0)
 
-        point_name = _parse_point_name(csv_path)
+        point_name = parse_point_name(csv_path)
         result[point_name] = df.sort_values("数据时间").reset_index(drop=True)
     return result
 
@@ -114,18 +114,10 @@ def _load_site_info(site_info_file: Path) -> dict[str, dict]:
 
     result: dict[str, dict] = {}
     for _, row in df.iterrows():
-        # 点位名称
-        point_name_full = str(row[col_mapping["point_name"]]) if pd.notna(row[col_mapping["point_name"]]) else ""
+        # 点位名称 - 直接使用原始值，不做正则提取
+        point_name = str(row[col_mapping["point_name"]]).strip() if pd.notna(row[col_mapping["point_name"]]) else ""
 
-        # 提取点位编号（如 "#1"）
-        if point_name_full:
-            import re
-            match = re.search(r'#\d+', point_name_full)
-            if match:
-                point_name = match.group()
-            else:
-                point_name = point_name_full
-        else:
+        if not point_name:
             continue
 
         # 可选字段
@@ -178,8 +170,20 @@ def _analyze_dry_weather_risk(
         if not point_name:
             continue
 
-        # 获取点位信息
-        info = site_info.get(point_name, {"diameter": 0, "depth": 0, "pipe_type": ""})
+        # 获取点位信息 - 尝试多种匹配方式
+        info = site_info.get(point_name)
+
+        # 如果直接匹配失败，尝试从点位编号中提取点位名部分
+        # 格式: 设备编号_点位名（如 35943_13, 35943_#1）
+        if info is None and "_" in point_name:
+            import re
+            # 提取第一个下划线之后的内容作为点位名
+            point_id = point_name.split("_", 1)[1]
+            info = site_info.get(point_id)
+
+        if info is None:
+            info = {"diameter": 0, "depth": 0, "pipe_type": ""}
+
         diameter = info["diameter"]
         well_depth = info["depth"]
         pipe_type = info["pipe_type"]
@@ -245,7 +249,19 @@ def _analyze_rainy_overflow_risk(
         rain_level = event.get("rain_level", "")
 
         for point_name, df in flow_data.items():
-            info = site_info.get(point_name, {"diameter": 0, "depth": 0, "pipe_type": ""})
+            # 获取点位信息 - 尝试多种匹配方式
+            info = site_info.get(point_name)
+
+            # 如果直接匹配失败，尝试从点位编号中提取点位名部分
+            # 格式: 设备编号_点位名（如 35943_13, 35943_#1）
+            if info is None and "_" in point_name:
+                # 提取第一个下划线之后的内容作为点位名
+                point_id = point_name.split("_", 1)[1]
+                info = site_info.get(point_id)
+
+            if info is None:
+                info = {"diameter": 0, "depth": 0, "pipe_type": ""}
+
             well_depth = info["depth"]
 
             # 筛选降雨场次时间范围

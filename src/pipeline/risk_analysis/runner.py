@@ -24,25 +24,32 @@ def _load_event_data_from_excel(combined_xlsx: Path, logger: logging.Logger) -> 
     event_data: dict[int, dict] = {}
 
     try:
-        wb = load_workbook(combined_xlsx, data_only=True)
+        import pandas as pd
+        xls = pd.ExcelFile(combined_xlsx)
 
-        if "场次降雨统计" in wb.sheetnames:
-            ws = wb["场次降雨统计"]
+        # 通过列名识别场次降雨统计 sheet
+        event_sheet = None
+        for sheet_name in xls.sheet_names:
+            df = pd.read_excel(xls, sheet_name=sheet_name)
+            cols = list(df.columns)
+            if "场次编号" in cols or "开始时间" in cols:
+                event_sheet = sheet_name
+                break
 
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if row[0] is None:
+        if event_sheet:
+            df = pd.read_excel(xls, sheet_name=event_sheet)
+            for _, row in df.iterrows():
+                if pd.isna(row.iloc[0]):
                     continue
 
-                event_id = int(row[0])
+                event_id = int(row.iloc[0])
                 event_data[event_id] = {
-                    "start": row[1],
-                    "end": row[2],
-                    "total_rain": float(row[3]) if row[3] else 0,
-                    "duration": float(row[4]) if row[4] else 0,
-                    "rain_level": row[11] if len(row) > 11 else "",
+                    "start": pd.to_datetime(row.iloc[1]),
+                    "end": pd.to_datetime(row.iloc[2]),
+                    "total_rain": float(row.iloc[3]) if pd.notna(row.iloc[3]) else 0,
+                    "duration": float(row.iloc[4]) if pd.notna(row.iloc[4]) else 0,
+                    "rain_level": str(row.iloc[11]) if len(row) > 11 and pd.notna(row.iloc[11]) else "",
                 }
-
-        wb.close()
 
     except Exception as e:
         logger.warning(f"读取场次降雨数据失败: {e}")
