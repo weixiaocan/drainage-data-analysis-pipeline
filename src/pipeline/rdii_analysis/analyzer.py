@@ -5,18 +5,25 @@
 RDII (Rainfall-Derived Infiltration and Inflow) = 雨天流量 - 旱天特征曲线
 """
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import gridspec
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-from src.core.data_utils import detect_flow_columns, parse_point_name, read_csv_with_fallback
+# 配置中文字体
+mpl.rcParams['font.sans-serif'] = ['SimHei']
+mpl.rcParams['font.serif'] = ['SimHei']
+mpl.rcParams['axes.unicode_minus'] = False
 
 
 @dataclass
@@ -25,12 +32,47 @@ class RDIIConfig:
     rain_effect_delay: float = 12.0  # 降雨效应延迟时间（小时）
 
 
+def _read_csv_with_fallback(path: Path) -> pd.DataFrame:
+    """尝试多种编码读取 CSV"""
+    last_err: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "gb2312"):
+        try:
+            return pd.read_csv(path, encoding=encoding)
+        except Exception as err:
+            last_err = err
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"无法读取 CSV: {path}")
+
+
+def _detect_columns(df: pd.DataFrame) -> tuple[str, str, str, str | None]:
+    """检测 CSV 列名"""
+    cols = [str(c).strip() for c in df.columns]
+    time_col = "数据时间" if "数据时间" in cols else next(c for c in cols if "时间" in c)
+    flow_col = "流量(L/s)(均值)" if "流量(L/s)(均值)" in cols else next(c for c in cols if "流量" in c)
+    level_col = "液位(m)(均值)" if "液位(m)(均值)" in cols else next(c for c in cols if "液位" in c)
+    velocity_col = None
+    for c in cols:
+        if "流速" in c:
+            velocity_col = c
+            break
+    return time_col, flow_col, level_col, velocity_col
+
+
+def _parse_point_name(path: Path) -> str:
+    """从文件名解析点位编号"""
+    stem = path.stem
+    if "_" in stem:
+        return stem.split("_", 1)[1]
+    return stem
+
+
 def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
     """加载流量数据"""
     result: dict[str, pd.DataFrame] = {}
     for csv_path in sorted(csv_dir.glob("*.csv")):
-        df = read_csv_with_fallback(csv_path)
-        time_col, flow_col, level_col, velocity_col = detect_flow_columns(df)
+        df = _read_csv_with_fallback(csv_path)
+        time_col, flow_col, level_col, velocity_col = _detect_columns(df)
 
         rename_map = {time_col: "数据时间", flow_col: "f", level_col: "l"}
         if velocity_col:
@@ -42,7 +84,7 @@ def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
         df["f"] = pd.to_numeric(df["f"], errors="coerce").fillna(0.0)
         df["l"] = pd.to_numeric(df["l"], errors="coerce").fillna(0.0)
 
-        point_name = parse_point_name(csv_path)
+        point_name = _parse_point_name(csv_path)
         result[point_name] = df.sort_values("数据时间").reset_index(drop=True)
     return result
 
@@ -108,7 +150,7 @@ def _get_rdii_stats(
     event_data: dict,
     delay_hours: float,
     selected_events: list[int] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+) -> tuple[pd.DataFrame, dict]:
     """计算RDII统计
 
     Args:
@@ -119,7 +161,7 @@ def _get_rdii_stats(
         selected_events: 选中的场次编号列表（如果为 None，使用全部场次）
 
     Returns:
-        (RDII总量DataFrame, 雨天流量总量DataFrame, RDII曲线数据字典)
+        (RDII总量DataFrame, RDII曲线数据字典)
     """
     point_names = list(dry_curve_data.keys())
     event_ids = sorted(event_data.keys())
@@ -129,7 +171,6 @@ def _get_rdii_stats(
         event_ids = [e for e in event_ids if e in selected_events]
 
     rdii_data: dict[str, list] = {"点位编号": point_names}
-    overflow_data: dict[str, list] = {"点位编号": point_names}
     rdii_curve_all: dict[int, dict[str, pd.DataFrame]] = {}
 
     for event_id in event_ids:
@@ -139,10 +180,8 @@ def _get_rdii_stats(
 
         # 生成时间序列
         delta_minutes = int((end - start).total_seconds() / 60) + 1
-        date_index = pd.date_range(start, end, freq="T")
 
         rdii_values = []
-        overflow_values = []
         rdii_curve_event: dict[str, pd.DataFrame] = {}
 
         for point_name in point_names:
@@ -151,22 +190,25 @@ def _get_rdii_stats(
 
             if df is None or dry_curve is None:
                 rdii_values.append(np.nan)
-                overflow_values.append(np.nan)
                 continue
 
             # 获取雨天流量数据
             event_df = df[(df["数据时间"] >= start) & (df["数据时间"] <= end)]
-            if len(event_df) != delta_minutes:
+
+            # 如果没有数据，跳过
+            if len(event_df) == 0:
                 rdii_values.append(np.nan)
-                overflow_values.append(np.nan)
                 continue
+
+            # 使用实际可用的数据长度
+            actual_delta = len(event_df)
 
             # 获取对应的旱天特征曲线
             # 从开始时间计算偏移量
             start_minute = start.hour * 60 + start.minute
             dry_flow = dry_curve["f"].values
-            dry_flow_tiled = np.tile(dry_flow, int(np.ceil(delta_minutes / 1440)) + 1)
-            dry_flow_segment = dry_flow_tiled[start_minute:start_minute + delta_minutes]
+            dry_flow_tiled = np.tile(dry_flow, int(np.ceil(actual_delta / 1440)) + 2)
+            dry_flow_segment = dry_flow_tiled[start_minute:start_minute + actual_delta]
 
             # 计算RDII
             rain_flow = event_df["f"].values
@@ -176,23 +218,18 @@ def _get_rdii_stats(
             rdii_total = rdii[rdii > 0].sum() * 60 / 1000
             rdii_values.append(round(rdii_total, 2))
 
-            # 雨天流量总量 (m³)
-            overflow_total = rain_flow.sum() * 60 / 1000
-            overflow_values.append(round(overflow_total, 2))
-
-            # 保存RDII曲线数据
+            # 保存RDII曲线数据（使用实际数据的时间索引）
             rdii_curve_event[point_name] = pd.DataFrame({
-                "时间": date_index[:len(rain_flow)],
+                "时间": event_df["数据时间"].values,
                 "雨天流量": rain_flow,
                 "旱天流量": dry_flow_segment[:len(rain_flow)],
                 "RDII": rdii,
             }).set_index("时间")
 
         rdii_data[f"场次{event_id}"] = rdii_values
-        overflow_data[f"场次{event_id}"] = overflow_values
         rdii_curve_all[event_id] = rdii_curve_event
 
-    return pd.DataFrame(rdii_data), pd.DataFrame(overflow_data), rdii_curve_all
+    return pd.DataFrame(rdii_data), rdii_curve_all
 
 
 def _save_to_excel(data: pd.DataFrame, excel_path: Path, sheet_name: str, headers: list[str]) -> None:
@@ -254,7 +291,6 @@ def run_rdii_analysis(
             "max_level": pd.DataFrame,      # 最大液位统计
             "avg_flow": pd.DataFrame,       # 平均流量统计
             "rdii_total": pd.DataFrame,     # RDII总量统计
-            "overflow_total": pd.DataFrame, # 雨天流量总量
             "rdii_curve_data": dict,        # RDII曲线数据
         }
     """
@@ -284,7 +320,7 @@ def run_rdii_analysis(
 
     # 计算RDII
     print(f"计算RDII (延迟时间: {cfg.rain_effect_delay}小时)")
-    rdii_total_df, overflow_total_df, rdii_curve_data = _get_rdii_stats(
+    rdii_total_df, rdii_curve_data = _get_rdii_stats(
         flow_data, dry_curve_data, event_data, cfg.rain_effect_delay, selected_events
     )
 
@@ -315,18 +351,148 @@ def run_rdii_analysis(
     )
     print(f"保存RDII总量统计: {combined_xlsx}")
 
-    _save_to_excel(
-        overflow_total_df,
-        combined_xlsx,
-        "雨天流量总量",
-        ["点位编号"] + [f"场次{e}" for e in event_ids_used]
-    )
-    print(f"保存雨天流量总量: {combined_xlsx}")
-
     return {
         "max_level": max_level_df,
         "avg_flow": avg_flow_df,
         "rdii_total": rdii_total_df,
-        "overflow_total": overflow_total_df,
         "rdii_curve_data": rdii_curve_data,
     }
+
+
+def draw_rdii_curves(
+    rdii_curve_data: dict[int, dict[str, pd.DataFrame]],
+    rain_data: pd.DataFrame,
+    event_data: dict[int, dict],
+    output_dir: Path,
+    delay_hours: float,
+    selected_events: list[int] | None = None,
+) -> None:
+    """绘制 RDII 过程线图
+
+    按照原 analyze_event_RDII.py 的格式绘制：
+    - 上图：降雨过程线（柱状图）
+    - 下图：RDII 过程线（雨天流量、旱天流量、RDII 三条线）
+
+    Args:
+        rdii_curve_data: RDII 曲线数据，结构为 {event_id: {point_name: DataFrame}}
+        rain_data: 降雨数据，index 为时间，包含 'rain' 列
+        event_data: 场次降雨数据
+        output_dir: 输出目录（config.charts_dir）
+        delay_hours: 降雨效应延迟时间（小时）
+        selected_events: 选中的场次编号列表（如果为 None，使用全部场次）
+    """
+    event_ids = sorted(rdii_curve_data.keys())
+
+    # 过滤选中的场次
+    if selected_events:
+        event_ids = [e for e in event_ids if e in selected_events]
+
+    for event_id in event_ids:
+        event = event_data.get(event_id)
+        if not event:
+            continue
+
+        time_start = event["start"]
+        time_end = event["end"] + timedelta(hours=delay_hours)
+
+        # 创建场次目录
+        time_name = f"{time_start.month}_{time_start.day}"
+        folder_name = f"event{event_id}_{time_name}"
+        event_dir = output_dir / "rdii_curve" / folder_name
+        event_dir.mkdir(parents=True, exist_ok=True)
+
+        # 获取该场次的降雨数据
+        event_rain = rain_data.loc[time_start:time_end].copy()
+
+        # 获取该场次的 RDII 数据
+        event_rdii_data = rdii_curve_data[event_id]
+
+        for point_name, rdii_df in event_rdii_data.items():
+            _draw_single_rdii_curve(
+                rdii_df=rdii_df,
+                event_rain=event_rain,
+                time_start=time_start,
+                time_end=time_end,
+                event_id=event_id,
+                point_name=point_name,
+                output_dir=event_dir,
+            )
+
+
+def _draw_single_rdii_curve(
+    rdii_df: pd.DataFrame,
+    event_rain: pd.DataFrame,
+    time_start: datetime,
+    time_end: datetime,
+    event_id: int,
+    point_name: str,
+    output_dir: Path,
+) -> None:
+    """绘制单个点位的 RDII 过程线
+
+    Args:
+        rdii_df: RDII 数据，index 为时间，包含 '雨天流量'、'旱天流量'、'RDII' 列
+        event_rain: 降雨数据，index 为时间，包含 'rain' 列
+        time_start: 开始时间
+        time_end: 结束时间
+        event_id: 场次编号
+        point_name: 点位名称
+        output_dir: 输出目录
+    """
+    # 准备绑制数据（删除 Overflow 列如果存在）
+    data_to_plot = rdii_df.copy()
+    if "Overflow" in data_to_plot.columns:
+        data_to_plot = data_to_plot.drop(columns=["Overflow"])
+
+    # 创建图表
+    fig = plt.figure(figsize=(10, 5))
+    gs = gridspec.GridSpec(2, 1, height_ratios=[1, 3])
+
+    ax1 = plt.subplot(gs[1])  # 下图：RDII 过程线
+    ax2 = plt.subplot(gs[0])  # 上图：降雨过程线
+
+    # 隐藏上图的 x 轴
+    ax2.get_xaxis().set_visible(False)
+
+    # 调整子图间距
+    fig.subplots_adjust(hspace=0)
+
+    # 绘制下图：RDII 过程线
+    data_to_plot.plot(ax=ax1, legend=True)
+
+    ax1.set_xlabel('时间', fontsize='large')
+    ax1.set_ylabel('流量/(L/s)', fontsize='large')
+
+    # 绘制上图：降雨过程线（柱状图）
+    # 降雨数据是分钟级的，需要聚合为适当间隔绘制柱状图
+    rain_to_plot = event_rain["rain"].copy()
+
+    # 如果数据点太多，进行聚合
+    if len(rain_to_plot) > 500:
+        # 按10分钟聚合
+        rain_to_plot = rain_to_plot.resample("10min").sum()
+
+    rain_to_plot.plot(ax=ax2, kind='bar', width=0.8)
+
+    # 设置上图 y 轴标签
+    ax2.set_ylabel('降雨/mm', fontsize='large')
+
+    # 设置 x 轴刻度（减少刻度数量）
+    if len(rain_to_plot) > 100:
+        # 只显示部分刻度
+        n_ticks = min(10, len(rain_to_plot))
+        step = len(rain_to_plot) // n_ticks
+        ax2.set_xticks(range(0, len(rain_to_plot), step))
+        ax2.set_xticklabels(
+            [rain_to_plot.index[i].strftime('%m-%d %H:%M') for i in range(0, len(rain_to_plot), step)],
+            rotation=45, ha='right'
+        )
+
+    # 保存图片
+    plt_name = output_dir / f"{point_name}_event{event_id}.png"
+    plt.savefig(plt_name, dpi=300, bbox_inches='tight')
+
+    # 清理
+    plt.cla()
+    plt.clf()
+    plt.close(fig)

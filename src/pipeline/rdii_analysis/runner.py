@@ -1,10 +1,11 @@
 """RDII分析模块入口
 
-统一接口: run(config: Config, logger, dry_curve_data=None, event_data=None) -> dict
+统一接口: run(config: Config, logger, dry_curve_data=None, event_data=None, rain_data=None) -> dict
 
 输出:
-    - config.combined_xlsx_path 的 "降雨事件最大液位"/"降雨事件平均流量"/"RDII总量统计"/"雨天流量总量" Sheet
-    - 返回值: {max_level, avg_flow, rdii_total, overflow_total, rdii_curve_data}
+    - config.combined_xlsx_path 的 "降雨事件最大液位"/"降雨事件平均流量"/"RDII总量统计" Sheet
+    - config.charts_dir/rdii_curve/ 下的 RDII 过程线图
+    - 返回值: {max_level, avg_flow, rdii_total, rdii_curve_data}
 """
 
 import logging
@@ -12,10 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from src.core.config import Config
+from core.config import Config
 from openpyxl import load_workbook
 
-from .analyzer import run_rdii_analysis
+from .analyzer import draw_rdii_curves, run_rdii_analysis
 
 
 def _load_dry_curve_data_from_excel(combined_xlsx: Path, logger: logging.Logger) -> dict[str, pd.DataFrame]:
@@ -91,6 +92,7 @@ def run(
     logger: logging.Logger,
     dry_curve_data: dict[str, pd.DataFrame] | None = None,
     event_data: dict[int, dict] | None = None,
+    rain_data: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """
     RDII分析入口。
@@ -99,22 +101,24 @@ def run(
         - 流量数据目录（从 config.flow_data_dir）
         - 旱天特征曲线数据（从内存传入，或从 Excel 读取）
         - 场次降雨数据（从内存传入，或从 Excel 读取）
+        - 降雨数据（从内存传入，用于绑制 RDII 过程线图）
         - 选中的场次编号（从 config.selected_rainfall_events）
 
     输出:
         - config.combined_xlsx_path 的多个 Sheet
+        - config.charts_dir/rdii_curve/ 下的 RDII 过程线图
 
     返回:
         {
             "max_level": pd.DataFrame,
             "avg_flow": pd.DataFrame,
             "rdii_total": pd.DataFrame,
-            "overflow_total": pd.DataFrame,
             "rdii_curve_data": dict,
         }
     """
     flow_dir = config.flow_data_dir
     combined_xlsx = config.combined_xlsx_path
+    charts_dir = config.charts_dir
     selected_events = config.selected_rainfall_events if config.selected_rainfall_events else None
 
     logger.info(f"开始RDII分析")
@@ -136,7 +140,6 @@ def run(
             "max_level": pd.DataFrame(),
             "avg_flow": pd.DataFrame(),
             "rdii_total": pd.DataFrame(),
-            "overflow_total": pd.DataFrame(),
             "rdii_curve_data": {},
         }
 
@@ -146,7 +149,6 @@ def run(
             "max_level": pd.DataFrame(),
             "avg_flow": pd.DataFrame(),
             "rdii_total": pd.DataFrame(),
-            "overflow_total": pd.DataFrame(),
             "rdii_curve_data": {},
         }
 
@@ -174,5 +176,18 @@ def run(
     logger.info(f"RDII分析完成")
     logger.info(f"  处理场次数: {len(result['rdii_curve_data'])}")
     logger.info(f"  处理点位数: {len(result['rdii_total'])}")
+
+    # 绑制 RDII 过程线图
+    if rain_data is not None and result['rdii_curve_data']:
+        logger.info("绑制 RDII 过程线图...")
+        draw_rdii_curves(
+            rdii_curve_data=result['rdii_curve_data'],
+            rain_data=rain_data,
+            event_data=event_data,
+            output_dir=charts_dir,
+            delay_hours=config.rainfall_delay_hours,
+            selected_events=selected_events,
+        )
+        logger.info(f"  图表保存至: {charts_dir / 'rdii_curve'}")
 
     return result

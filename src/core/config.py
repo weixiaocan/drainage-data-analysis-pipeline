@@ -50,11 +50,9 @@ class Config:
 
         config_path = config_path or self._project_root / "config.yaml"
         env_path = env_path or self._project_root / ".env"
-        baseinfo_path = baseinfo_path or self._project_root / "data" / "baseinfo.xlsx"
 
         self._config_path = config_path
         self._env_path = env_path
-        self._baseinfo_path = baseinfo_path
 
         self._env: dict[str, str] = {}
         self._yaml: dict[str, Any] = {}
@@ -62,6 +60,16 @@ class Config:
 
         self._load_env(env_path)
         self._load_yaml(config_path)
+
+        # baseinfo_path 可以从 config.yaml 中配置
+        if baseinfo_path is None:
+            baseinfo_file = self._yaml.get("baseinfo_file")
+            if baseinfo_file:
+                baseinfo_path = self._resolve_path(baseinfo_file)
+            else:
+                baseinfo_path = self._project_root / "data" / "baseinfo.xlsx"
+
+        self._baseinfo_path = baseinfo_path
         self._load_baseinfo(baseinfo_path)
 
     @classmethod

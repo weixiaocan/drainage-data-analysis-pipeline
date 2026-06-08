@@ -15,8 +15,6 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, PatternFill, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-from src.core.data_utils import detect_flow_columns, detect_site_info_columns, parse_point_name, read_csv_with_fallback
-
 
 @dataclass
 class DryAnalysisConfig:
@@ -25,12 +23,47 @@ class DryAnalysisConfig:
     expected_rows_per_day: int = 1440  # 每日理论数据条数
 
 
+def _read_csv_with_fallback(path: Path) -> pd.DataFrame:
+    """尝试多种编码读取 CSV"""
+    last_err: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "gb2312"):
+        try:
+            return pd.read_csv(path, encoding=encoding)
+        except Exception as err:
+            last_err = err
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"无法读取 CSV: {path}")
+
+
+def _detect_columns(df: pd.DataFrame) -> tuple[str, str, str, str | None]:
+    """检测 CSV 列名"""
+    cols = [str(c).strip() for c in df.columns]
+    time_col = "数据时间" if "数据时间" in cols else next(c for c in cols if "时间" in c)
+    flow_col = "流量(L/s)(均值)" if "流量(L/s)(均值)" in cols else next(c for c in cols if "流量" in c)
+    level_col = "液位(m)(均值)" if "液位(m)(均值)" in cols else next(c for c in cols if "液位" in c)
+    velocity_col = None
+    for c in cols:
+        if "流速" in c:
+            velocity_col = c
+            break
+    return time_col, flow_col, level_col, velocity_col
+
+
+def _parse_point_name(path: Path) -> str:
+    """从文件名解析点位编号，如 35891_#1.csv -> #1"""
+    stem = path.stem
+    if "_" in stem:
+        return stem.split("_", 1)[1]
+    return stem
+
+
 def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
     """加载流量数据目录下所有 CSV"""
     result: dict[str, pd.DataFrame] = {}
     for csv_path in sorted(csv_dir.glob("*.csv")):
-        df = read_csv_with_fallback(csv_path)
-        time_col, flow_col, level_col, velocity_col = detect_flow_columns(df)
+        df = _read_csv_with_fallback(csv_path)
+        time_col, flow_col, level_col, velocity_col = _detect_columns(df)
 
         # 重命名列
         rename_map = {time_col: "数据时间", flow_col: "f", level_col: "l"}
@@ -48,13 +81,14 @@ def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
         if "velo" in df.columns:
             df["velo"] = pd.to_numeric(df["velo"], errors="coerce").fillna(0.0)
 
-        point_name = parse_point_name(csv_path)
+        point_name = _parse_point_name(csv_path)
         result[point_name] = df.sort_values("数据时间").reset_index(drop=True)
     return result
 
 
 def _read_filter_result(filter_file: Path) -> dict[str, list[str]]:
     """从筛选结果 xlsx 读取有效旱天列表（绿色填充单元格）"""
+    import re
     wb = load_workbook(filter_file)
     ws = wb["筛选结果"]
 
@@ -68,10 +102,16 @@ def _read_filter_result(filter_file: Path) -> dict[str, list[str]]:
     # 读取每个点位的有效旱天（绿色填充）
     result: dict[str, list[str]] = {}
     for row in range(3, ws.max_row + 1):  # 从第3行开始（跳过表头和雨量行）
-        point_name = ws.cell(row=row, column=1).value
-        if not point_name:
+        point_name_raw = ws.cell(row=row, column=1).value
+        if not point_name_raw:
             continue
-        point_name = str(point_name)
+        point_name_raw = str(point_name_raw)
+
+        # 提取点位编号（如 "35891_#1" -> "#1", "35943_13" -> "13"）
+        if "_" in point_name_raw:
+            point_name = point_name_raw.split("_", 1)[1]
+        else:
+            point_name = point_name_raw
 
         valid_days: list[str] = []
         for col, date_str in dates:
@@ -92,43 +132,40 @@ def _load_site_info(site_info_file: Path) -> dict[str, dict[str, float]]:
     """从点位信息 xlsx 读取管径、井深等信息"""
     df = pd.read_excel(site_info_file)
 
-    # 通过列名关键词识别列
-    col_mapping = detect_site_info_columns(df)
+    # 检测列名
+    cols = [str(c).strip() for c in df.columns]
 
-    # 验证必需列
-    if col_mapping["point_name"] is None:
-        raise ValueError(f"点位信息文件缺少点位名称列，可用列: {list(df.columns)}")
+    # 查找关键列
+    point_col = None
+    diameter_col = None
+    depth_col = None
+
+    for c in cols:
+        if "监测点位" in c or "点位" in c:
+            point_col = c
+        elif "管径" in c:
+            diameter_col = c
+        elif "井深" in c:
+            depth_col = c
 
     result: dict[str, dict[str, float]] = {}
     for _, row in df.iterrows():
         # 点位名称
-        point_name_full = str(row[col_mapping["point_name"]]) if pd.notna(row[col_mapping["point_name"]]) else ""
-
-        # 提取点位编号（如 "#1"）
-        if point_name_full:
-            import re
-            match = re.search(r'#\d+', point_name_full)
-            if match:
-                point_name = match.group()
-            else:
-                point_name = point_name_full
-        else:
+        point_name_full = str(row[point_col]) if point_col and pd.notna(row.get(point_col)) else ""
+        if not point_name_full:
             continue
 
-        # 可选字段
-        diameter = 0.0
-        if col_mapping["diameter"]:
-            try:
-                diameter = float(row[col_mapping["diameter"]]) if pd.notna(row[col_mapping["diameter"]]) else 0.0
-            except (ValueError, TypeError):
-                pass
+        # 提取点位编号（如 "#1"）
+        import re
+        match = re.search(r'#\d+', point_name_full)
+        if match:
+            point_name = match.group()
+        else:
+            point_name = point_name_full
 
-        depth = 0.0
-        if col_mapping["depth"]:
-            try:
-                depth = float(row[col_mapping["depth"]]) if pd.notna(row[col_mapping["depth"]]) else 0.0
-            except (ValueError, TypeError):
-                pass
+        # 管径和井深
+        diameter = float(row[diameter_col]) if diameter_col and pd.notna(row.get(diameter_col)) else 0.0
+        depth = float(row[depth_col]) if depth_col and pd.notna(row.get(depth_col)) else 0.0
 
         result[point_name] = {
             "diameter": diameter,  # 管径 (m)
@@ -191,9 +228,6 @@ def _get_dry_curve_data(
 ) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, pd.DataFrame], pd.DataFrame]:
     """计算旱天特征曲线
 
-    使用 pandas groupby 计算每分钟平均值，天然支持缺失数据。
-    每分钟的平均值只计算该分钟有数据的天数。
-
     Returns:
         dry_curve_data: 总体特征曲线
         dry_curve_data_workday: 工作日特征曲线
@@ -213,72 +247,55 @@ def _get_dry_curve_data(
         if not days:
             continue
 
-        # 收集所有天的数据
-        all_days_data: list[pd.DataFrame] = []
-        workday_data: list[pd.DataFrame] = []
-        weekend_data: list[pd.DataFrame] = []
+        # 初始化累加数组
+        day_flow_temp = np.zeros((1440, 3))
+        day_flow_workday_temp = np.zeros((1440, 3))
+        day_flow_weekend_temp = np.zeros((1440, 3))
         workday_num = 0
         weekend_num = 0
 
         for day in days:
             day_start = f"{day} 00:00:00"
             day_end = f"{day} 23:59:00"
-            day_df = df[(df["数据时间"] >= day_start) & (df["数据时间"] <= day_end)].copy()
+            day_df = df[(df["数据时间"] >= day_start) & (df["数据时间"] <= day_end)]
 
             if len(day_df) == 0:
                 continue
 
-            # 添加分钟列（0-1439）
-            day_df["minute"] = day_df["数据时间"].dt.hour * 60 + day_df["数据时间"].dt.minute
+            # 获取当天数据（1440 个点）
+            values = day_df[["f", "l", "velo"]].values if "velo" in day_df.columns else day_df[["f", "l"]].values
+            if len(values) == 1440:
+                day_flow_temp += values[:, :3] if values.shape[1] >= 3 else np.column_stack([values, np.zeros(1440)])
 
-            # 选择需要的列
-            cols_to_use = ["minute", "f", "l"]
-            if "velo" in day_df.columns:
-                cols_to_use.append("velo")
+                # 判断工作日/周末
+                weekday = parse(day).weekday() + 1
+                if weekday in [1, 2, 3, 4, 5]:
+                    workday_num += 1
+                    day_flow_workday_temp += values[:, :3] if values.shape[1] >= 3 else np.column_stack([values, np.zeros(1440)])
+                else:
+                    weekend_num += 1
+                    day_flow_weekend_temp += values[:, :3] if values.shape[1] >= 3 else np.column_stack([values, np.zeros(1440)])
 
-            all_days_data.append(day_df[cols_to_use])
-
-            # 判断工作日/周末
-            weekday = parse(day).weekday() + 1
-            if weekday in [1, 2, 3, 4, 5]:
-                workday_num += 1
-                workday_data.append(day_df[cols_to_use])
-            else:
-                weekend_num += 1
-                weekend_data.append(day_df[cols_to_use])
-
-        # 计算总体特征曲线
-        if all_days_data:
-            combined = pd.concat(all_days_data, ignore_index=True)
-            curve = combined.groupby("minute").mean(numeric_only=True)
-            # 确保索引完整（0-1439），缺失的用 NaN
-            curve = curve.reindex(range(1440))
+        total_days = len(days)
+        if total_days > 0:
             dry_curve_data[point_name] = pd.DataFrame(
-                curve.values,
+                day_flow_temp / total_days,
                 index=day_index,
-                columns=columns[: curve.shape[1]]
+                columns=columns[:3] if day_flow_temp.shape[1] >= 3 else columns[:2]
             )
 
-        # 计算工作日特征曲线
-        if workday_data:
-            combined = pd.concat(workday_data, ignore_index=True)
-            curve = combined.groupby("minute").mean(numeric_only=True)
-            curve = curve.reindex(range(1440))
+        if workday_num > 0:
             dry_curve_data_workday[point_name] = pd.DataFrame(
-                curve.values,
+                day_flow_workday_temp / workday_num,
                 index=day_index,
-                columns=columns[: curve.shape[1]]
+                columns=columns
             )
 
-        # 计算周末特征曲线
-        if weekend_data:
-            combined = pd.concat(weekend_data, ignore_index=True)
-            curve = combined.groupby("minute").mean(numeric_only=True)
-            curve = curve.reindex(range(1440))
+        if weekend_num > 0:
             dry_curve_data_weekend[point_name] = pd.DataFrame(
-                curve.values,
+                day_flow_weekend_temp / weekend_num,
                 index=day_index,
-                columns=columns[: curve.shape[1]]
+                columns=columns
             )
 
         day_num_list.append((point_name, workday_num, weekend_num))
