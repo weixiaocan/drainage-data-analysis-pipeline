@@ -65,6 +65,24 @@ class PipelineState:
             return self.data["dry_analysis"].get("dry_curve_data")
         return None
 
+    def get_dry_curve_data_workday(self) -> dict[str, pd.DataFrame] | None:
+        """获取工作日旱天特征曲线数据（从 dry_analysis 模块）"""
+        if "dry_analysis" in self.data:
+            return self.data["dry_analysis"].get("dry_curve_data_workday")
+        return None
+
+    def get_dry_curve_data_weekend(self) -> dict[str, pd.DataFrame] | None:
+        """获取周末旱天特征曲线数据（从 dry_analysis 模块）"""
+        if "dry_analysis" in self.data:
+            return self.data["dry_analysis"].get("dry_curve_data_weekend")
+        return None
+
+    def get_day_num(self) -> pd.DataFrame | None:
+        """获取工作日/周末天数统计（从 dry_analysis 模块）"""
+        if "dry_analysis" in self.data:
+            return self.data["dry_analysis"].get("day_num")
+        return None
+
     def get_event_data(self) -> dict[int, dict] | None:
         """获取场次降雨数据（从 rainfall_analysis 模块）"""
         if "rainfall_analysis" in self.data:
@@ -134,6 +152,7 @@ class Orchestrator:
         self.config = config
         self.logger = logger
         self.state = PipelineState()
+        self.non_interactive = False  # 非交互模式（跳过所有确认）
 
     def _log(self, level: str, msg: str) -> None:
         """输出日志"""
@@ -196,9 +215,12 @@ class Orchestrator:
             return self.state.has_rainfall_data
         return True  # 默认触发
 
-    def run(self) -> bool:
+    def run(self, stop_before: str | None = None) -> bool:
         """
         执行完整的 Pipeline 流程。
+
+        参数:
+            stop_before: 停止在指定模块之前（不执行该模块），如 "report_assembler"
 
         返回:
             True: 所有模块执行成功
@@ -206,6 +228,8 @@ class Orchestrator:
         """
         self._log("info", "=" * 60)
         self._log("info", "开始执行 Pipeline")
+        if stop_before:
+            self._log("info", f"将在 [{stop_before}] 模块之前停止")
         self._log("info", "=" * 60)
 
         # 构建介入点索引
@@ -214,6 +238,11 @@ class Orchestrator:
         success = True
 
         for module_info in self.MODULES:
+            # 检查是否停止在指定模块之前
+            if stop_before and module_info.name == stop_before:
+                self._log("info", f"到达停止点 [{module_info.name}]，跳过后续所有模块")
+                break
+
             # 条件执行检查
             if module_info.condition == "has_rainfall_data":
                 if not self.state.rainfall_check_done:
@@ -313,6 +342,19 @@ class Orchestrator:
                 kwargs["dry_curve_data"] = dry_curve_data
                 self._log("info", f"  传递上游数据: dry_curve_data ({len(dry_curve_data)} 个点位)")
 
+            # 为 pattern_analysis 传递完整数据
+            if module_info.name == "pattern_analysis":
+                dry_curve_data_workday = self.state.get_dry_curve_data_workday()
+                dry_curve_data_weekend = self.state.get_dry_curve_data_weekend()
+                day_num = self.state.get_day_num()
+
+                if dry_curve_data_workday:
+                    kwargs["dry_curve_data_workday"] = dry_curve_data_workday
+                if dry_curve_data_weekend:
+                    kwargs["dry_curve_data_weekend"] = dry_curve_data_weekend
+                if day_num is not None:
+                    kwargs["day_num"] = day_num
+
         if module_info.needs_event_data:
             event_data = self.state.get_event_data()
             if event_data:
@@ -336,6 +378,16 @@ class Orchestrator:
         """
         print(point["message"])
 
+        # 非交互模式下自动继续
+        if self.non_interactive:
+            self._log("info", "非交互模式，自动继续")
+            # 如果是介入点 2，需要重新加载 baseinfo
+            if point["type"] == "reload":
+                self.config.reload_baseinfo()
+                selected = self.config.selected_rainfall_events
+                self._log("info", f"已重新加载 baseinfo.xlsx，选中场次: {selected}")
+            return True
+
         while True:
             ans = input("输入 y 继续 (q 退出): ").strip().lower()
             if ans == "q":
@@ -358,6 +410,11 @@ class Orchestrator:
         output_file = self._get_module_output_file(module_info)
 
         if output_file is None or not output_file.exists():
+            return False
+
+        # 非交互模式下总是重新执行
+        if self.non_interactive:
+            self._log("info", f"输出文件已存在，非交互模式下重新执行")
             return False
 
         # 输出文件已存在，询问用户

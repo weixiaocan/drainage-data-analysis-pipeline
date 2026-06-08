@@ -244,6 +244,12 @@ def _save_to_excel(data: pd.DataFrame, excel_path: Path, sheet_name: str, header
         if "Sheet" in wb.sheetnames:
             wb.remove(wb["Sheet"])
 
+    # 删除旧的冗余sheet（已合并到 event_stats 模块的"降雨事件统计"中）
+    legacy_sheets = ["降雨事件最大液位", "降雨事件平均流量"]
+    for legacy in legacy_sheets:
+        if legacy in wb.sheetnames:
+            wb.remove(wb[legacy])
+
     if sheet_name in wb.sheetnames:
         wb.remove(wb[sheet_name])
 
@@ -327,22 +333,8 @@ def run_rdii_analysis(
     # 保存统计结果到 Excel
     event_ids_used = selected_events if selected_events else sorted(event_data.keys())
 
-    _save_to_excel(
-        max_level_df,
-        combined_xlsx,
-        "降雨事件最大液位",
-        ["点位编号"] + [f"场次{e}" for e in event_ids_used]
-    )
-    print(f"保存最大液位统计: {combined_xlsx}")
-
-    _save_to_excel(
-        avg_flow_df,
-        combined_xlsx,
-        "降雨事件平均流量",
-        ["点位编号"] + [f"场次{e}" for e in event_ids_used]
-    )
-    print(f"保存平均流量统计: {combined_xlsx}")
-
+    # 注意："降雨事件最大液位"和"降雨事件平均流量"已在 event_stats 模块输出，
+    # 此处只输出 RDII 特有的统计结果
     _save_to_excel(
         rdii_total_df,
         combined_xlsx,

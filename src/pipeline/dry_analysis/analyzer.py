@@ -339,7 +339,6 @@ def _get_dry_flow_sta(
             "日均流量(m³/d)": round(curve_df["f"].mean() * 86.4, 2),
             "日最大流量(L/s)": round(curve_df["f"].max(), 2),
             "日最小流量(L/s)": round(curve_df["f"].min(), 2),
-            "流量标准差(L/s)": round(curve_df["f"].std(), 2),
             "最大液位(m)": round(flow_df["l"].max(), 2) if "l" in flow_df.columns else 0,
             "最大充满度": round(flow_df["l"].max() / diameter * 1000, 2) if diameter > 0 else 0,
             "外溢风险": round(flow_df["l"].max() / depth, 2) if depth > 0 else 0,
@@ -364,6 +363,11 @@ def _save_to_excel(data: pd.DataFrame, excel_path: Path, sheet_name: str, header
         # 删除默认 sheet
         if "Sheet" in wb.sheetnames:
             wb.remove(wb["Sheet"])
+
+    # 删除已有的特征曲线 sheet（不再需要输出到 Excel）
+    sheets_to_remove = [name for name in wb.sheetnames if name.startswith("特征曲线_")]
+    for name in sheets_to_remove:
+        wb.remove(wb[name])
 
     # 删除已存在的 sheet
     if sheet_name in wb.sheetnames:
@@ -514,15 +518,14 @@ def run_dry_analysis(
         statistics,
         combined_xlsx,
         "旱天分析",
-        ["点位编号", "日均流量(m³/d)", "日最大流量(L/s)", "日最小流量(L/s)", "流量标准差(L/s)",
+        ["点位编号", "日均流量(m³/d)", "日最大流量(L/s)", "日最小流量(L/s)",
          "最大液位(m)", "最大充满度", "外溢风险", "平均流速(m/s)", "平均液位(m)"]
     )
     print(f"保存旱天分析结果: {combined_xlsx}")
 
-    # 保存旱天特征曲线数据（供后续模块使用）
-    print("保存旱天特征曲线数据...")
-    _save_dry_curve_data_to_excel(dry_curve_data_smooth, combined_xlsx)
-    print(f"  保存特征曲线: {len(dry_curve_data_smooth)} 个点位")
+    # 不再保存旱天特征曲线数据到 Excel，通过内存传递给后续模块
+    # 如需调试，可取消注释以下代码：
+    # _save_dry_curve_data_to_excel(dry_curve_data_smooth, combined_xlsx)
 
     return {
         "dry_curve_data": dry_curve_data_smooth,

@@ -37,9 +37,10 @@ def main() -> int:
 
     logger = logging.getLogger("main")
     orchestrator = Orchestrator(config, logger)
+    orchestrator.non_interactive = True  # 非交互模式
 
-    # 4. 执行 Pipeline
-    success = orchestrator.run()
+    # 4. 执行 Pipeline（跳过报告生成模块）
+    success = orchestrator.run(stop_before="report_assembler")
 
     # 5. 输出结果
     if success:

@@ -92,18 +92,14 @@ def _get_event_stats(
                 avg_flow = event_df["f"].mean() * 86.4
                 # 峰值流量 (L/s)
                 peak_flow = event_df["f"].max()
-                # 流量标准差
-                flow_std = event_df["f"].std()
 
                 row[f"场次{event_id}_最大液位(m)"] = round(max_level, 2)
                 row[f"场次{event_id}_平均流量(m³/d)"] = round(avg_flow, 2)
                 row[f"场次{event_id}_峰值流量(L/s)"] = round(peak_flow, 2)
-                row[f"场次{event_id}_流量标准差"] = round(flow_std, 2)
             else:
                 row[f"场次{event_id}_最大液位(m)"] = np.nan
                 row[f"场次{event_id}_平均流量(m³/d)"] = np.nan
                 row[f"场次{event_id}_峰值流量(L/s)"] = np.nan
-                row[f"场次{event_id}_流量标准差"] = np.nan
 
         rows.append(row)
 
@@ -198,7 +194,6 @@ def run_event_stats(
             f"场次{event_id}_最大液位(m)",
             f"场次{event_id}_平均流量(m³/d)",
             f"场次{event_id}_峰值流量(L/s)",
-            f"场次{event_id}_流量标准差",
         ])
 
     _save_to_excel(event_stats_df, combined_xlsx, "雨天事件统计", headers)

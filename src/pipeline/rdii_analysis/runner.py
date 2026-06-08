@@ -3,7 +3,7 @@
 统一接口: run(config: Config, logger, dry_curve_data=None, event_data=None, rain_data=None) -> dict
 
 输出:
-    - config.combined_xlsx_path 的 "降雨事件最大液位"/"降雨事件平均流量"/"RDII总量统计" Sheet
+    - config.combined_xlsx_path 的 "RDII总量统计" Sheet
     - config.charts_dir/rdii_curve/ 下的 RDII 过程线图
     - 返回值: {max_level, avg_flow, rdii_total, rdii_curve_data}
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from core.config import Config
+from src.core.config import Config
 from openpyxl import load_workbook
 
 from .analyzer import draw_rdii_curves, run_rdii_analysis
