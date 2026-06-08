@@ -22,6 +22,13 @@ class RainfallConfig:
     min_rainfall: float = 1.0     # 最小降雨量阈值（mm）
 
 
+@dataclass
+class RainfallData:
+    """降雨数据容器"""
+    df: pd.DataFrame              # 降雨数据，index 为时间
+    freq: str                     # 数据频率: "minute" 或 "hourly"
+
+
 def _read_csv_with_fallback(path: Path) -> pd.DataFrame:
     """尝试多种编码读取 CSV"""
     last_err: Exception | None = None
@@ -35,11 +42,13 @@ def _read_csv_with_fallback(path: Path) -> pd.DataFrame:
     raise RuntimeError(f"无法读取 CSV: {path}")
 
 
-def _load_rain_data(rainfall_file: Path) -> pd.DataFrame:
+def _load_rain_data(rainfall_file: Path) -> RainfallData:
     """加载降雨数据并预处理
 
-    自动检测数据频率（分钟级/小时级/日级），统一输出为分钟级数据。
-    小时级数据会展开为分钟级，均匀分配降雨量。
+    自动检测数据频率（分钟级/小时级/日级），保持原始粒度不变。
+
+    Returns:
+        RainfallData 对象，包含数据和频率信息
     """
     df = _read_csv_with_fallback(rainfall_file)
 
@@ -76,9 +85,9 @@ def _load_rain_data(rainfall_file: Path) -> pd.DataFrame:
     median_diff = time_diffs.median()
 
     if median_diff <= pd.Timedelta(minutes=5):
-        # 分钟级数据，直接填充连续时间序列
         freq = "minute"
         print(f"检测到分钟级降雨数据（间隔 {median_diff}）")
+        # 填充连续时间序列
         time_start = df["time"].min()
         time_end = df["time"].max()
         full_index = pd.date_range(time_start, time_end, freq="T")
@@ -87,59 +96,46 @@ def _load_rain_data(rainfall_file: Path) -> pd.DataFrame:
         df["rain"] = df["rain"].fillna(0.0)
 
     elif median_diff <= pd.Timedelta(hours=3):
-        # 小时级数据，展开为分钟级并均匀分配
         freq = "hourly"
-        print(f"检测到小时级降雨数据（间隔 {median_diff}），展开为分钟级数据")
-        df = _expand_hourly_to_minute(df_sorted)
+        print(f"检测到小时级降雨数据（间隔 {median_diff}），保持小时粒度")
+        # 填充连续小时序列
+        time_start = df_sorted["time"].min()
+        time_end = df_sorted["time"].max()
+        full_index = pd.date_range(time_start, time_end, freq="H")
+        full_df = pd.DataFrame({"time": full_index})
+        df = full_df.merge(df_sorted, on="time", how="left")
+        df["rain"] = df["rain"].fillna(0.0)
+
+    elif median_diff <= pd.Timedelta(days=1.5):
+        freq = "daily"
+        print(f"检测到日级降雨数据（间隔 {median_diff}），保持日粒度")
+        # 对于日级数据，直接使用原始数据
+        df = df_sorted.copy()
     else:
-        # 日级或其他频率，暂不支持
-        raise ValueError(f"不支持的降雨数据频率: {median_diff}，请提供分钟级或小时级数据")
+        raise ValueError(f"不支持的降雨数据频率: {median_diff}，请提供分钟级、小时级或日级数据")
 
-    return df.set_index("time")
+    return RainfallData(df=df.set_index("time"), freq=freq)
 
 
-def _expand_hourly_to_minute(df: pd.DataFrame) -> pd.DataFrame:
-    """将小时级降雨数据展开为分钟级，均匀分配降雨量
-
-    例如：1:00 的 10mm 降雨量 -> 0:00-0:59 每分钟 10/60 ≈ 0.167mm
+def _get_daily_rain(rain_data: pd.DataFrame, freq: str = "minute") -> pd.DataFrame:
+    """计算日降雨量
 
     Args:
-        df: 包含 'time' 和 'rain' 列的 DataFrame，时间为整点小时
+        rain_data: 降雨数据 DataFrame，index 为时间
+        freq: 数据频率
 
     Returns:
-        展开后的分钟级 DataFrame
+        日降雨量统计 DataFrame
     """
-    records = []
-    for _, row in df.iterrows():
-        hour_start = row["time"]
-        rain_per_minute = row["rain"] / 60.0
-
-        # 生成该小时的60分钟记录
-        for minute in range(60):
-            minute_time = hour_start + pd.Timedelta(minutes=minute)
-            records.append({
-                "time": minute_time,
-                "rain": rain_per_minute,
-            })
-
-    result = pd.DataFrame(records)
-
-    # 填充可能缺失的小时（确保连续）
-    time_start = result["time"].min()
-    time_end = result["time"].max()
-    full_index = pd.date_range(time_start, time_end, freq="T")
-    full_df = pd.DataFrame({"time": full_index})
-    result = full_df.merge(result, on="time", how="left")
-    result["rain"] = result["rain"].fillna(0.0)
-
-    return result
-
-
-def _get_daily_rain(rain_data: pd.DataFrame) -> pd.DataFrame:
-    """计算日降雨量"""
-    daily = rain_data.resample("D").sum()
-    daily = daily.reset_index()
-    daily.columns = ["日期", "日降雨量(mm)"]
+    if freq == "daily":
+        # 日级数据直接使用
+        daily = rain_data.reset_index()
+        daily.columns = ["日期", "日降雨量(mm)"]
+    else:
+        # 分钟/小时级数据需要 resample
+        daily = rain_data.resample("D").sum()
+        daily = daily.reset_index()
+        daily.columns = ["日期", "日降雨量(mm)"]
     return daily
 
 
@@ -176,6 +172,7 @@ def _get_rain_info(
     rain_rng: list[tuple[datetime, datetime]],
     rain_data: pd.DataFrame,
     min_rain: float,
+    freq: str = "minute",
 ) -> pd.DataFrame:
     """提取场次降雨特征值
 
@@ -183,6 +180,7 @@ def _get_rain_info(
         rain_rng: 场次降雨起止时间列表
         rain_data: 降雨数据 DataFrame
         min_rain: 最小降雨量阈值（mm）
+        freq: 数据频率 ("minute" 或 "hourly")
 
     Returns:
         场次降雨统计 DataFrame
@@ -195,19 +193,31 @@ def _get_rain_info(
 
         if total_rain > min_rain:
             duration = (end - start).total_seconds() / 3600  # 小时
-            records.append({
+            record = {
                 "场次编号": i + 1,
                 "开始时间": start,
                 "结束时间": end,
                 "总降雨量(mm)": round(total_rain, 2),
                 "降雨历时(h)": round(duration, 2),
-                "最大1分钟降雨量(mm)": round(event_data["rain"].max(), 2),
-                "最大5分钟降雨量(mm)": round(event_data["rain"].rolling(5).sum().max(), 2),
-                "最大10分钟降雨量(mm)": round(event_data["rain"].rolling(10).sum().max(), 2),
-                "最大60分钟降雨量(mm)": round(event_data["rain"].rolling(60).sum().max(), 2),
-                "最大24小时降雨量(mm)": round(event_data["rain"].rolling(1440).sum().max(), 2),
-                "平均强度(mm/h)": round(total_rain / duration, 2) if duration > 0 else 0,
-            })
+            }
+
+            if freq == "minute":
+                # 分钟级数据：计算分钟级滚动指标
+                record["峰值雨强(mm/min)"] = round(event_data["rain"].max(), 2)
+                record["最大5分钟降雨量(mm)"] = round(event_data["rain"].rolling(5).sum().max(), 2)
+                record["最大10分钟降雨量(mm)"] = round(event_data["rain"].rolling(10).sum().max(), 2)
+                record["最大1小时降雨量(mm)"] = round(event_data["rain"].rolling(60).sum().max(), 2)
+                record["最大24小时降雨量(mm)"] = round(event_data["rain"].rolling(1440).sum().max(), 2)
+            else:
+                # 小时级数据：计算小时级滚动指标
+                record["峰值雨强(mm/h)"] = round(event_data["rain"].max(), 2)
+                record["最大3小时降雨量(mm)"] = round(event_data["rain"].rolling(3).sum().max(), 2)
+                record["最大6小时降雨量(mm)"] = round(event_data["rain"].rolling(6).sum().max(), 2)
+                record["最大12小时降雨量(mm)"] = round(event_data["rain"].rolling(12).sum().max(), 2)
+                record["最大24小时降雨量(mm)"] = round(event_data["rain"].rolling(24).sum().max(), 2)
+
+            record["平均强度(mm/h)"] = round(total_rain / duration, 2) if duration > 0 else 0
+            records.append(record)
 
     return pd.DataFrame(records)
 
@@ -252,7 +262,7 @@ def _save_to_excel(data: pd.DataFrame, excel_path: Path, sheet_name: str, header
     for r_idx, row in enumerate(dataframe_to_rows(data, index=False, header=True), 1):
         for c_idx, value in enumerate(row, 1):
             if isinstance(value, datetime):
-                value = value.strftime("%Y-%m-%d %H:%M")
+                value = value.strftime("%Y-%m-%d")
             ws.cell(row=r_idx, column=c_idx, value=value)
 
     # 替换表头
@@ -272,6 +282,281 @@ def _save_to_excel(data: pd.DataFrame, excel_path: Path, sheet_name: str, header
     wb.save(excel_path)
 
 
+def _add_daily_analysis_sheet(excel_path: Path, daily_rain: pd.DataFrame, rain_overview: pd.DataFrame) -> None:
+    """添加降雨日分析 sheet
+
+    包含：
+    1. 降雨概况数据
+    2. 日降雨量时间序列条形图
+    3. 降雨日占比饼图
+    """
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, PieChart, Reference
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.text import RichText
+    from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, Font, RegularTextRun
+    from openpyxl.styles import Alignment, Border, Side, Font as CellFont
+
+    # 确保目录存在
+    excel_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 打开或创建工作簿
+    try:
+        wb = load_workbook(excel_path)
+    except FileNotFoundError:
+        wb = Workbook()
+        if "Sheet" in wb.sheetnames:
+            wb.remove(wb["Sheet"])
+
+    # 删除所有旧的降雨相关 sheet
+    old_sheets = [
+        "降雨日分析", "降雨场次分析",
+        "rainfall_analysis", "降雨分析",
+        "日降雨量统计", "场次降雨统计", "降雨概况",
+    ]
+    for sheet_name in old_sheets:
+        if sheet_name in wb.sheetnames:
+            wb.remove(wb[sheet_name])
+
+    ws = wb.create_sheet(sheet_name)
+
+    # ========== 写入降雨概况 ==========
+    ws.cell(row=1, column=1, value="降雨概况")
+    ws.merge_cells('A1:B1')
+    ws.cell(row=1, column=1).font = CellFont(bold=True, size=12)
+    ws.cell(row=1, column=1).alignment = Alignment(horizontal="center")
+
+    for i, row in enumerate(rain_overview.itertuples(), 2):
+        ws.cell(row=i, column=1, value=row.指标)
+        ws.cell(row=i, column=2, value=row.数值)
+
+    # 格式化降雨概况表格
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    for row_idx in range(2, len(rain_overview) + 2):
+        for col_idx in range(1, 3):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal="center")
+
+    # ========== 写入日降雨量数据（用于图表） ==========
+    start_col = 4  # 从第4列开始写日降雨量数据
+    ws.cell(row=1, column=start_col, value="日期")
+    ws.cell(row=1, column=start_col + 1, value="日降雨量(mm)")
+
+    for i, row in enumerate(daily_rain.itertuples(), 2):
+        date_val = row.日期
+        if hasattr(date_val, 'strftime'):
+            ws.cell(row=i, column=start_col, value=date_val.strftime("%Y-%m-%d"))
+        else:
+            ws.cell(row=i, column=start_col, value=str(date_val)[:10])
+        ws.cell(row=i, column=start_col + 1, value=row._2)
+
+    data_rows = len(daily_rain) + 1
+
+    # ========== 写入饼图数据 ==========
+    pie_col = start_col + 4
+    rainy_days = (daily_rain["日降雨量(mm)"] > 0).sum()
+    non_rainy_days = len(daily_rain) - rainy_days
+
+    ws.cell(row=1, column=pie_col, value="类型")
+    ws.cell(row=1, column=pie_col + 1, value="天数")
+    ws.cell(row=2, column=pie_col, value="降雨日")
+    ws.cell(row=2, column=pie_col + 1, value=rainy_days)
+    ws.cell(row=3, column=pie_col, value="非降雨日")
+    ws.cell(row=3, column=pie_col + 1, value=non_rainy_days)
+
+    # ========== 图1: 日降雨量时间序列条形图 ==========
+    bar_chart = BarChart()
+    bar_chart.type = "col"
+    bar_chart.title = "日降雨量时间序列"
+    bar_chart.y_axis.title = "降雨量(mm)"
+    bar_chart.x_axis.title = "日期"
+    bar_chart.width = 20
+    bar_chart.height = 10
+
+    # 去掉网格线
+    bar_chart.y_axis.majorGridlines = None
+    bar_chart.y_axis.minorGridlines = None
+    bar_chart.x_axis.majorGridlines = None
+    bar_chart.x_axis.minorGridlines = None
+
+    # 数据引用
+    data_ref = Reference(ws, min_col=start_col + 1, min_row=1, max_row=data_rows)
+    cats_ref = Reference(ws, min_col=start_col, min_row=2, max_row=data_rows)
+
+    bar_chart.add_data(data_ref, titles_from_data=True)
+    bar_chart.set_categories(cats_ref)
+
+    ws.add_chart(bar_chart, "A8")
+
+    # ========== 图2: 降雨日占比饼图 ==========
+    pie_chart = PieChart()
+    pie_chart.title = None
+    pie_chart.width = 10
+    pie_chart.height = 10
+    pie_chart.legend = None
+
+    pie_data = Reference(ws, min_col=pie_col + 1, min_row=1, max_row=3)
+    pie_cats = Reference(ws, min_col=pie_col, min_row=2, max_row=3)
+
+    pie_chart.add_data(pie_data, titles_from_data=True)
+    pie_chart.set_categories(pie_cats)
+
+    pie_chart.dataLabels = DataLabelList()
+    pie_chart.dataLabels.showPercent = True
+    pie_chart.dataLabels.showVal = True
+    pie_chart.dataLabels.showCatName = True
+
+    ws.add_chart(pie_chart, "A28")
+
+    # ========== 设置字体 ==========
+    def set_chart_font(chart_obj):
+        if chart_obj.title:
+            chart_obj.title.txPr = RichText(
+                p=[Paragraph(
+                    pPr=ParagraphProperties(defRPr=CharacterProperties(
+                        latin=Font(typeface="Times New Roman"),
+                        ea=Font(typeface="宋体")
+                    )),
+                    r=[RegularTextRun(t=chart_obj.title.txPr.p[0].r[0].t if chart_obj.title.txPr and chart_obj.title.txPr.p and chart_obj.title.txPr.p[0].r else "")]
+                )]
+            )
+
+        if hasattr(chart_obj, 'y_axis') and chart_obj.y_axis.title:
+            y_title_text = chart_obj.y_axis.title.txPr.p[0].r[0].t if chart_obj.y_axis.title.txPr and chart_obj.y_axis.title.txPr.p and chart_obj.y_axis.title.txPr.p[0].r else ""
+            chart_obj.y_axis.title.txPr = RichText(
+                p=[Paragraph(
+                    pPr=ParagraphProperties(defRPr=CharacterProperties(
+                        latin=Font(typeface="Times New Roman"),
+                        ea=Font(typeface="宋体")
+                    )),
+                    r=[RegularTextRun(t=y_title_text)]
+                )]
+            )
+
+        if hasattr(chart_obj, 'x_axis') and chart_obj.x_axis.title:
+            x_title_text = chart_obj.x_axis.title.txPr.p[0].r[0].t if chart_obj.x_axis.title.txPr and chart_obj.x_axis.title.txPr.p and chart_obj.x_axis.title.txPr.p[0].r else ""
+            chart_obj.x_axis.title.txPr = RichText(
+                p=[Paragraph(
+                    pPr=ParagraphProperties(defRPr=CharacterProperties(
+                        latin=Font(typeface="Times New Roman"),
+                        ea=Font(typeface="宋体")
+                    )),
+                    r=[RegularTextRun(t=x_title_text)]
+                )]
+            )
+
+        if chart_obj.legend:
+            chart_obj.legend.txPr = RichText(
+                p=[Paragraph(
+                    pPr=ParagraphProperties(defRPr=CharacterProperties(
+                        latin=Font(typeface="Times New Roman"),
+                        ea=Font(typeface="宋体")
+                    )),
+                    r=[]
+                )]
+            )
+
+    set_chart_font(bar_chart)
+
+    if pie_chart.dataLabels:
+        pie_chart.dataLabels.txPr = RichText(
+            p=[Paragraph(
+                pPr=ParagraphProperties(defRPr=CharacterProperties(
+                    latin=Font(typeface="Times New Roman"),
+                    ea=Font(typeface="宋体")
+                )),
+                r=[]
+            )]
+        )
+
+    wb.save(excel_path)
+    print(f"保存降雨日分析: {excel_path}")
+
+
+def _add_event_analysis_sheet(excel_path: Path, event_rain: pd.DataFrame, freq: str) -> None:
+    """添加降雨场次分析 sheet
+
+    包含：
+    1. 场次降雨统计表格
+    """
+    if event_rain.empty:
+        print("无场次降雨数据，跳过")
+        return
+
+    wb = load_workbook(excel_path)
+
+    # 删除已存在的 sheet
+    sheet_name = "降雨场次分析"
+    if sheet_name in wb.sheetnames:
+        wb.remove(wb[sheet_name])
+
+    ws = wb.create_sheet(sheet_name)
+
+    # 表头
+    if freq == "minute":
+        headers = ["场次编号", "开始时间", "结束时间", "总降雨量(mm)", "降雨历时(h)",
+                   "峰值雨强(mm/min)", "最大5分钟降雨量(mm)", "最大10分钟降雨量(mm)",
+                   "最大1小时降雨量(mm)", "最大24小时降雨量(mm)", "平均强度(mm/h)", "降雨等级"]
+    else:
+        headers = ["场次编号", "开始时间", "结束时间", "总降雨量(mm)", "降雨历时(h)",
+                   "峰值雨强(mm/h)", "最大3小时降雨量(mm)", "最大6小时降雨量(mm)",
+                   "最大12小时降雨量(mm)", "最大24小时降雨量(mm)", "平均强度(mm/h)", "降雨等级"]
+
+    # 写入表头
+    for col_idx, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col_idx, value=header)
+
+    # 写入数据
+    for row_idx in range(len(event_rain)):
+        for col_idx in range(len(event_rain.columns)):
+            value = event_rain.iloc[row_idx, col_idx]
+            if isinstance(value, datetime):
+                value = value.strftime("%Y-%m-%d %H:%M")
+            # 处理 NaN 值
+            if pd.isna(value):
+                value = ""
+            ws.cell(row=row_idx + 2, column=col_idx + 1, value=value)
+
+    # 格式化
+    center_alignment = Alignment(horizontal="center", vertical="center")
+    thin_side = Side(style="thin", color="000000")
+    full_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+        for cell in row:
+            cell.alignment = center_alignment
+            cell.border = full_border
+
+    wb.save(excel_path)
+    print(f"保存降雨场次分析: {excel_path}")
+
+
+def _get_rain_overview(daily_rain: pd.DataFrame) -> pd.DataFrame:
+    """生成降雨概况统计
+
+    Args:
+        daily_rain: 日降雨量统计 DataFrame
+
+    Returns:
+        降雨概况 DataFrame
+    """
+    total_days = len(daily_rain)
+    rainy_days = (daily_rain["日降雨量(mm)"] > 0).sum()
+    non_rainy_days = total_days - rainy_days
+    total_rain = daily_rain["日降雨量(mm)"].sum()
+
+    return pd.DataFrame({
+        "指标": ["监测总天数", "降雨日数", "非降雨日数", "总降雨量(mm)"],
+        "数值": [total_days, rainy_days, non_rainy_days, round(total_rain, 2)],
+    })
+
+
 def run_rainfall_analysis(
     rainfall_file: Path,
     combined_xlsx: Path,
@@ -287,9 +572,11 @@ def run_rainfall_analysis(
     Returns:
         {
             "daily_rain": pd.DataFrame,      # 日降雨量统计
-            "event_rain": pd.DataFrame,       # 场次降雨统计
+            "event_rain": pd.DataFrame,       # 场次降雨统计（日级数据为空）
             "rain_data": pd.DataFrame,        # 预处理后的降雨数据
+            "rain_overview": pd.DataFrame,    # 降雨概况
             "event_data_dict": dict,          # 场次降雨详细数据（供后续模块使用）
+            "freq": str,                      # 数据频率 ("minute"/"hourly"/"daily")
         }
     """
     # 合并配置
@@ -301,65 +588,67 @@ def run_rainfall_analysis(
 
     # 加载降雨数据
     print(f"读取降雨数据: {rainfall_file}")
-    rain_data = _load_rain_data(rainfall_file)
+    rainfall_data = _load_rain_data(rainfall_file)
+    rain_data = rainfall_data.df
+    freq = rainfall_data.freq
     print(f"  - 时间范围: {rain_data.index.min()} ~ {rain_data.index.max()}")
     print(f"  - 总降雨量: {rain_data['rain'].sum():.2f} mm")
+    print(f"  - 数据频率: {freq}")
 
     # 日降雨量统计
     print("计算日降雨量统计")
-    daily_rain = _get_daily_rain(rain_data)
+    daily_rain = _get_daily_rain(rain_data, freq)
     rainy_days = (daily_rain["日降雨量(mm)"] > 0).sum()
     print(f"  - 降雨日数: {rainy_days}")
 
-    # 场次降雨划分
-    print(f"场次降雨划分: 间隔 {cfg.min_interval} 小时, 最小降雨量 {cfg.min_rainfall} mm")
-    rain_rng = _time_split(rain_data, cfg.min_interval)
-    event_rain = _get_rain_info(rain_rng, rain_data, cfg.min_rainfall)
-    print(f"  - 场次降雨数: {len(event_rain)}")
+    # 降雨概况
+    print("计算降雨概况")
+    rain_overview = _get_rain_overview(daily_rain)
 
-    # 添加降雨等级
-    if not event_rain.empty:
-        event_rain["降雨等级"] = event_rain["总降雨量(mm)"].apply(_classify_rain_level)
-
-    # 输出到综合分析结果.xlsx
-    # 日降雨量 sheet
-    _save_to_excel(
-        daily_rain,
-        combined_xlsx,
-        "日降雨量统计",
-        ["日期", "日降雨量(mm)"]
-    )
-    print(f"保存日降雨量统计: {combined_xlsx}")
-
-    # 场次降雨 sheet
-    _save_to_excel(
-        event_rain,
-        combined_xlsx,
-        "场次降雨统计",
-        ["场次编号", "开始时间", "结束时间", "总降雨量(mm)", "降雨历时(h)",
-         "最大1分钟降雨量(mm)", "最大5分钟降雨量(mm)", "最大10分钟降雨量(mm)",
-         "最大60分钟降雨量(mm)", "最大24小时降雨量(mm)", "平均强度(mm/h)", "降雨等级"]
-    )
-    print(f"保存场次降雨统计: {combined_xlsx}")
-
-    # 构建场次降雨数据字典（供后续模块在内存中使用）
+    # 场次降雨划分（仅支持分钟级和小时级数据）
+    event_rain = pd.DataFrame()
     event_data_dict: dict[int, dict] = {}
-    for _, row in event_rain.iterrows():
-        event_id = int(row["场次编号"])
-        start = row["开始时间"]
-        end = row["结束时间"]
-        event_data_dict[event_id] = {
-            "start": start,
-            "end": end,
-            "total_rain": row["总降雨量(mm)"],
-            "duration": row["降雨历时(h)"],
-            "rain_level": row["降雨等级"],
-            "data": rain_data.loc[start:end].copy(),
-        }
+
+    if freq == "daily":
+        print("日级数据不支持场次降雨划分，跳过")
+    else:
+        print(f"场次降雨划分: 间隔 {cfg.min_interval} 小时, 最小降雨量 {cfg.min_rainfall} mm")
+        rain_rng = _time_split(rain_data, cfg.min_interval)
+        event_rain = _get_rain_info(rain_rng, rain_data, cfg.min_rainfall, freq)
+        print(f"  - 场次降雨数: {len(event_rain)}")
+
+        # 添加降雨等级
+        if not event_rain.empty:
+            event_rain["降雨等级"] = event_rain["总降雨量(mm)"].apply(_classify_rain_level)
+
+        # 构建场次降雨数据字典
+        for _, row in event_rain.iterrows():
+            event_id = int(row["场次编号"])
+            start = row["开始时间"]
+            end = row["结束时间"]
+            event_data_dict[event_id] = {
+                "start": start,
+                "end": end,
+                "total_rain": row["总降雨量(mm)"],
+                "duration": row["降雨历时(h)"],
+                "rain_level": row["降雨等级"],
+            }
+
+    # 输出到 Excel
+    print("生成降雨分析结果")
+
+    # Sheet 1: 降雨日分析（概况 + 图表）
+    _add_daily_analysis_sheet(combined_xlsx, daily_rain, rain_overview)
+
+    # Sheet 2: 降雨场次分析
+    if not event_rain.empty:
+        _add_event_analysis_sheet(combined_xlsx, event_rain, freq)
 
     return {
         "daily_rain": daily_rain,
         "event_rain": event_rain,
         "rain_data": rain_data,
+        "rain_overview": rain_overview,
         "event_data_dict": event_data_dict,
+        "freq": freq,
     }

@@ -4,7 +4,7 @@
 
 输出:
     - config.combined_xlsx_path 的 "日降雨量统计"/"场次降雨统计" Sheet
-    - 返回值: {daily_rain, event_rain, event_data_dict, ...}
+    - 返回值: {daily_rain, event_rain, event_data_dict, freq, ...}
 """
 
 import logging
@@ -21,7 +21,7 @@ def run(config: Config, logger: logging.Logger) -> dict[str, Any]:
     降雨分析入口。
 
     输入:
-        - 降雨数据文件（从 config.rainfall_data_path）
+        - 降雨数据文件（从 config.rainfall_data_path），支持分钟级或小时级数据
 
     输出:
         - config.combined_xlsx_path 的 "日降雨量统计"/"场次降雨统计" Sheet
@@ -32,6 +32,7 @@ def run(config: Config, logger: logging.Logger) -> dict[str, Any]:
             "event_rain": pd.DataFrame,       # 场次降雨统计
             "rain_data": pd.DataFrame,        # 预处理后的降雨数据
             "event_data_dict": dict,          # 场次降雨详细数据（供后续模块使用）
+            "freq": str,                      # 数据频率 ("minute" 或 "hourly")
         }
     """
     rainfall_file = config.rainfall_data_path
