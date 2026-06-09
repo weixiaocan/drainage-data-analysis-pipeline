@@ -63,24 +63,25 @@ def _add_rows_from_template(table: Table, count: int, template_idx: int) -> None
     if template_idx >= len(table.rows):
         template_idx = len(table.rows) - 1
 
-    template_row = table.rows[template_idx]
-
     for _ in range(count):
-        new_row = table.add_row()
-        _copy_row_format(template_row, new_row)
+        new_tr = deepcopy(table.rows[template_idx]._tr)
+        table._tbl.append(new_tr)
 
 
 def _copy_row_format(source_row: _Row, target_row: _Row) -> None:
     """复制行格式到目标行"""
     for src_cell, tgt_cell in zip(source_row.cells, target_row.cells):
-        # 复制单元格宽度
-        tgt_cell.width = src_cell.width
+        # 复制单元格宽度（跳过 None）
+        if src_cell.width is not None:
+            tgt_cell.width = src_cell.width
 
         # 复制段落格式
         for src_para, tgt_para in zip(src_cell.paragraphs, tgt_cell.paragraphs):
             tgt_para.alignment = src_para.alignment
-            tgt_para.paragraph_format.space_before = src_para.paragraph_format.space_before
-            tgt_para.paragraph_format.space_after = src_para.paragraph_format.space_after
+            if src_para.paragraph_format.space_before is not None:
+                tgt_para.paragraph_format.space_before = src_para.paragraph_format.space_before
+            if src_para.paragraph_format.space_after is not None:
+                tgt_para.paragraph_format.space_after = src_para.paragraph_format.space_after
 
             # 复制字体样式
             if src_para.runs:
@@ -90,9 +91,12 @@ def _copy_row_format(source_row: _Row, target_row: _Row) -> None:
                 else:
                     tgt_run = tgt_para.add_run()
 
-                tgt_run.font.name = src_run.font.name
-                tgt_run.font.size = src_run.font.size
-                tgt_run.font.bold = src_run.font.bold
+                if src_run.font.name is not None:
+                    tgt_run.font.name = src_run.font.name
+                if src_run.font.size is not None:
+                    tgt_run.font.size = src_run.font.size
+                if src_run.font.bold is not None:
+                    tgt_run.font.bold = src_run.font.bold
                 if src_run.font.color.rgb:
                     tgt_run.font.color.rgb = src_run.font.color.rgb
 
@@ -202,7 +206,8 @@ def _create_curve_table(doc: Document, template_table: Table) -> Table:
         tgt_row = new_table.rows[0]
 
         for i, (src_cell, tgt_cell) in enumerate(zip(src_row.cells, tgt_row.cells)):
-            tgt_cell.width = src_cell.width
+            if src_cell.width is not None:
+                tgt_cell.width = src_cell.width
 
             # 设置默认文字
             if i == 0:

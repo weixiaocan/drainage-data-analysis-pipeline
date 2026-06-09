@@ -71,12 +71,27 @@ def _save_to_excel(df: pd.DataFrame, combined_xlsx: Path) -> None:
     保存统计结果到 Excel。
 
     如果文件已存在，追加新 Sheet；否则创建新文件。
+    数据收集率列以百分比格式显示。
     """
     if combined_xlsx.exists():
         with pd.ExcelWriter(
             combined_xlsx, engine="openpyxl", mode="a", if_sheet_exists="replace"
         ) as writer:
             df.to_excel(writer, sheet_name="数据收集率统计", index=False)
+            _format_percentage(writer.sheets["数据收集率统计"], df, "数据收集率(%)")
     else:
         with pd.ExcelWriter(combined_xlsx, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="数据收集率统计", index=False)
+            _format_percentage(writer.sheets["数据收集率统计"], df, "数据收集率(%)")
+
+
+def _format_percentage(ws, df: pd.DataFrame, col_name: str) -> None:
+    """设置指定列为百分比格式"""
+    from openpyxl.styles import numbers
+
+    # 找到列索引
+    col_idx = df.columns.get_loc(col_name) + 1  # openpyxl 从 1 开始
+
+    # 设置百分比格式（从第 2 行开始，跳过表头）
+    for row_idx in range(2, len(df) + 2):
+        ws.cell(row=row_idx, column=col_idx).number_format = "0.00%"

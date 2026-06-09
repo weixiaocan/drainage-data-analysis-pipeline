@@ -15,6 +15,9 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, PatternFill, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+from src.core.data_utils import read_csv_with_fallback
+from src.core.schema import flow_to_legacy_df, normalize_flow_df, parse_flow_filename
+
 
 @dataclass
 class DryAnalysisConfig:
@@ -62,26 +65,10 @@ def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
     """加载流量数据目录下所有 CSV"""
     result: dict[str, pd.DataFrame] = {}
     for csv_path in sorted(csv_dir.glob("*.csv")):
-        df = _read_csv_with_fallback(csv_path)
-        time_col, flow_col, level_col, velocity_col = _detect_columns(df)
+        df = read_csv_with_fallback(csv_path)
+        df = flow_to_legacy_df(normalize_flow_df(df, csv_path))
 
-        # 重命名列
-        rename_map = {time_col: "数据时间", flow_col: "f", level_col: "l"}
-        if velocity_col:
-            rename_map[velocity_col] = "velo"
-        df = df.rename(columns=rename_map)
-
-        # 解析时间
-        df["数据时间"] = pd.to_datetime(df["数据时间"], errors="coerce")
-        df = df.dropna(subset=["数据时间"]).copy()
-
-        # 转换数值
-        df["f"] = pd.to_numeric(df["f"], errors="coerce").fillna(0.0)
-        df["l"] = pd.to_numeric(df["l"], errors="coerce").fillna(0.0)
-        if "velo" in df.columns:
-            df["velo"] = pd.to_numeric(df["velo"], errors="coerce").fillna(0.0)
-
-        point_name = _parse_point_name(csv_path)
+        point_name = parse_flow_filename(csv_path).point_id
         result[point_name] = df.sort_values("数据时间").reset_index(drop=True)
     return result
 
@@ -185,7 +172,7 @@ def _preprocess_flow_data(flow_data: dict[str, pd.DataFrame], expected_rows: int
         time_end = df["数据时间"].max()
 
         # 生成完整的时间序列
-        full_index = pd.date_range(time_start, time_end, freq="T")
+        full_index = pd.date_range(time_start, time_end, freq="min")
         full_df = pd.DataFrame({"数据时间": full_index})
 
         # 合并并插值
@@ -234,7 +221,7 @@ def _get_dry_curve_data(
         dry_curve_data_weekend: 周末特征曲线
         day_num: 工作日/周末天数统计
     """
-    day_index = pd.date_range("00:00:00", "23:59:00", freq="T")
+    day_index = pd.date_range("00:00:00", "23:59:00", freq="min")
     columns = ["f", "l", "velo"]
 
     dry_curve_data: dict[str, pd.DataFrame] = {}

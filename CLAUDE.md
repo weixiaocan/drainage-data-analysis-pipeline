@@ -1,116 +1,67 @@
-# CLAUDE.md
+## 项目简介
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本项目是一个**排水监测数据分析与报告生成系统工作流就**，用于处理排水管网监测点的流量、液位数据，结合降雨数据进行分析，最终生成 Word 格式的分析报告。
 
-## Commands
+## 整体流程
 
-```bash
-# Run the full pipeline
-python run.py
-
-# Run all tests
-pytest tests/
-
-# Run a single test file
-pytest tests/test_rainfall_analysis.py -v
-
-# Run unit tests only
-pytest tests/unit/ -v
-```
-
-## Architecture
-
-The system is a pipeline for analyzing drainage monitoring data and generating reports. Key directories:
-
-- `src/core/` - Shared infrastructure (Config, LLM client, logger, data utilities)
-- `src/pipeline/` - 8 analysis modules, each with a `runner.py` entry point
-- `src/orchestrator/` - Pipeline orchestration with intervention points
-
-### Pipeline Execution Order
+系统采用 Pipeline 架构，按顺序执行 8 个分析模块：
 
 ```
-data_filter → rainfall_analysis → dry_analysis → event_stats → pattern_analysis → rdii_analysis → risk_analysis → report_assembler
-     │              │                              │
-  Intervention 1  Intervention 2              Intervention 3
+数据筛选 → 降雨分析 → 旱天分析 → 雨天事件统计 → 排污规律分析 → RDII分析 → 风险分析 → 报告组装
+    │         │                          │
+ 介入点1   介入点2                   介入点3
 ```
 
-### Module Entry Point Convention
+### 各模块功能
 
-Every module under `src/pipeline/` follows this interface:
+| 模块 | 功能 |
+|------|------|
+| 数据筛选 | 筛选有效旱天数据，剔除缺失率高、雨天、异常天 |
+| 降雨分析 | 日降雨统计、场次划分、等级评定 |
+| 旱天分析 | 计算旱天流量特征曲线 |
+| 雨天事件统计 | 统计降雨事件下各点位数据 |
+| 排污规律分析 | 流量曲线特征识别与分类 |
+| RDII分析 | 降雨入流入渗计算 |
+| 风险分析 | 旱天风险 + 雨天溢流风险评估 |
+| 报告组装 | 填充 Word 模板生成最终报告 |
+
+### 人工介入点
+
+流程中有 3 个人工介入点，需要用户审核后才能继续：
+
+1. **介入点1**：审核数据筛选结果
+2. **介入点2**：选择需要分析的降雨场次
+3. **介入点3**：确认旱天特征曲线
+
+
+## 模块接口约定
+
+每个模块遵循统一接口：
 
 ```python
 # src/pipeline/<module_name>/runner.py
 def run(config: Config, logger, **kwargs) -> dict | None:
     """
-    Read from config paths, execute logic, write to config paths.
-    Returns dict with data for downstream modules, or None on failure.
+    从 config 读取路径，执行逻辑，写入输出。
+    返回 dict 供下游模块使用，失败返回 None。
     """
 ```
 
-### Data Flow
 
-- Modules pass data through memory (`dry_curve_data`, `event_data`)
-- All outputs are also written to Excel files for debugging and recovery
-- Main output file: `outputs/综合分析结果.xlsx` (multiple sheets)
-- Final report: `outputs/报告初稿.docx`
+## 重要约束
 
-### Configuration (Three Layers)
+### 1. 输出文件统一
 
-1. **User layer** (`data/baseinfo.xlsx`): Project info, analysis parameters, selected rainfall events
-2. **Technical layer** (`config.yaml`): Paths, thresholds, LLM settings
-3. **Secrets layer** (`.env`): `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`
+**所有模块的计算结果统一写入 `outputs/综合分析结果.xlsx`**，每个模块生成独立的 sheet。
 
-Access via `Config` class:
+例如降雨分析模块生成：
+- `降雨日分析` sheet：降雨概况 + 图表
+- `降雨场次分析` sheet：场次降雨统计表格
 
-```python
-config = Config.load()
-input_path = config.flow_data_dir
-output_path = config.combined_xlsx_path
-threshold = config.missing_rate_threshold
-```
+### 2. 保持原始数据粒度
 
-For testing:
+**不强行改变数据粒度**。例如：
+- 小时级降雨数据保持小时粒度，不展开为分钟级
+- 根据数据频率动态调整统计指标
 
-```python
-config = Config.for_testing(output_dir=tmp_path, flow_data_dir="tests/data_sample/flow/")
-```
-
-### Shared Data Utilities
-
-Use `src/core/data_utils.py` for common operations:
-
-```python
-from src.core.data_utils import (
-    read_csv_with_fallback,      # Multi-encoding CSV reader
-    detect_flow_columns,          # Auto-detect time/flow/level columns
-    detect_site_info_columns,     # Auto-detect site info columns
-    parse_point_name,             # Extract point ID from filename
-)
-```
-
-### LLM Usage
-
-LLM is used for:
-- `pattern_analysis`: Generate discharge pattern descriptions
-- `report_assembler`: Generate report summary
-
-Handle failures gracefully:
-
-```python
-try:
-    result = llm_client.chat(prompt)
-except LLMFailedAfterRetry:
-    result = "LLM failed, manual review needed"
-```
-
-## Key Constraints
-
-- **No hardcoded paths**: All paths from `Config`
-- **No imports from `sewage_monitoring/` or `_archive_old_agents/`**: Those are deprecated
-- **Column detection by keywords, not indices**: Excel column order may change
-
-## Related Documentation
-
-- [Architecture](docs/ARCHITECTURE.md) - Full architecture design
-- [PRD](docs/PRD-v0.3.md) - Product requirements
-- [Refactor Roadmap](docs/REFACTOR-ROADMAP.md) - Migration plan
+### 3. 每个模块写完后必须要进行测试，结果要人工核实，测试完确认功能没问题后要提交git并推送至远程，如果是worktree要合并到main分支中然后提交

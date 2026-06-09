@@ -14,6 +14,8 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+from src.core.schema import normalize_rainfall_df
+
 
 @dataclass
 class RainfallConfig:
@@ -50,34 +52,8 @@ def _load_rain_data(rainfall_file: Path) -> RainfallData:
     Returns:
         RainfallData 对象，包含数据和频率信息
     """
-    df = _read_csv_with_fallback(rainfall_file)
-
-    # 检测时间列和雨量列
-    cols = [str(c).strip().lower() for c in df.columns]
-    time_col = None
-    rain_col = None
-
-    for i, c in enumerate(df.columns):
-        c_lower = str(c).strip().lower()
-        if 't' == c_lower or 'time' in c_lower:
-            time_col = df.columns[i]
-        if 'rain' in c_lower:
-            rain_col = df.columns[i]
-
-    if time_col is None:
-        time_col = df.columns[0]
-    if rain_col is None:
-        rain_col = df.columns[1]
-
-    # 解析时间
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-    df = df.dropna(subset=[time_col]).copy()
-
-    # 转换雨量
-    df[rain_col] = pd.to_numeric(df[rain_col], errors="coerce").fillna(0.0)
-
-    # 重命名列
-    df = df.rename(columns={time_col: "time", rain_col: "rain"})
+    df = normalize_rainfall_df(_read_csv_with_fallback(rainfall_file))
+    df = df.rename(columns={"timestamp": "time", "rain_mm": "rain"})
 
     # 检测数据频率
     df_sorted = df.sort_values("time")
@@ -90,7 +66,7 @@ def _load_rain_data(rainfall_file: Path) -> RainfallData:
         # 填充连续时间序列
         time_start = df["time"].min()
         time_end = df["time"].max()
-        full_index = pd.date_range(time_start, time_end, freq="T")
+        full_index = pd.date_range(time_start, time_end, freq="min")
         full_df = pd.DataFrame({"time": full_index})
         df = full_df.merge(df, on="time", how="left")
         df["rain"] = df["rain"].fillna(0.0)
@@ -101,7 +77,7 @@ def _load_rain_data(rainfall_file: Path) -> RainfallData:
         # 填充连续小时序列
         time_start = df_sorted["time"].min()
         time_end = df_sorted["time"].max()
-        full_index = pd.date_range(time_start, time_end, freq="H")
+        full_index = pd.date_range(time_start, time_end, freq="h")
         full_df = pd.DataFrame({"time": full_index})
         df = full_df.merge(df_sorted, on="time", how="left")
         df["rain"] = df["rain"].fillna(0.0)
@@ -187,14 +163,15 @@ def _get_rain_info(
     """
     records: list[dict] = []
 
-    for i, (start, end) in enumerate(rain_rng):
+    for start, end in rain_rng:
         event_data = rain_data.loc[start:end]
         total_rain = event_data["rain"].sum()
 
         if total_rain > min_rain:
+            event_id = len(records) + 1
             duration = (end - start).total_seconds() / 3600  # 小时
             record = {
-                "场次编号": i + 1,
+                "场次编号": event_id,
                 "开始时间": start,
                 "结束时间": end,
                 "总降雨量(mm)": round(total_rain, 2),
@@ -557,6 +534,79 @@ def _get_rain_overview(daily_rain: pd.DataFrame) -> pd.DataFrame:
     })
 
 
+def _save_rainfall_png_charts(daily_rain: pd.DataFrame, output_dir: Path) -> dict[str, Path]:
+    """Save Word-ready rainfall charts as PNG files."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    chart_paths = {
+        "daily_bar": output_dir / "日降雨量时间序列图.png",
+        "rainy_ratio": output_dir / "降雨日占比饼图.png",
+    }
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"生成降雨 PNG 图失败，matplotlib 不可用: {exc}")
+        return chart_paths
+
+    plot_df = daily_rain.copy()
+    plot_df["日期"] = pd.to_datetime(plot_df["日期"], errors="coerce")
+    plot_df["日降雨量(mm)"] = pd.to_numeric(plot_df["日降雨量(mm)"], errors="coerce").fillna(0)
+
+    plt.rcParams["font.family"] = ["Times New Roman", "SimSun"]
+    plt.rcParams["font.sans-serif"] = ["SimSun", "宋体", "Microsoft YaHei", "DejaVu Sans"]
+    plt.rcParams["font.serif"] = ["Times New Roman", "SimSun"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+    fig, ax = plt.subplots(figsize=(9.2, 4.8), dpi=180)
+    labels = [d.strftime("%Y-%m-%d") if not pd.isna(d) else "" for d in plot_df["日期"]]
+    x = np.arange(len(labels))
+    ax.bar(x, plot_df["日降雨量(mm)"], color="#5B9BD5", edgecolor="#2F5597", linewidth=0.6)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("降雨量(mm)")
+    ax.set_xlabel("日期")
+    ax.set_title("日降雨量时间序列")
+    ax.tick_params(axis="x", rotation=45, labelsize=7.5)
+    ax.tick_params(axis="y", labelsize=9)
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_color("#000000")
+        spine.set_linewidth(0.8)
+    fig.tight_layout()
+    fig.savefig(chart_paths["daily_bar"], bbox_inches="tight")
+    plt.close(fig)
+
+    rainy_days = int((plot_df["日降雨量(mm)"] > 0).sum())
+    non_rainy_days = int(len(plot_df) - rainy_days)
+    total_days = max(1, rainy_days + non_rainy_days)
+    pie_labels = ["", ""]
+    fig, ax = plt.subplots(figsize=(4.8, 4.8), dpi=180)
+    label_iter = iter(["降雨日", "非降雨日"])
+    ax.pie(
+        [rainy_days, non_rainy_days],
+        labels=pie_labels,
+        autopct=lambda pct: _pie_autopct(pct, total_days, next(label_iter)),
+        pctdistance=0.58,
+        startangle=90,
+        colors=["#5B9BD5", "#ED7D31"],
+        wedgeprops={"edgecolor": "white", "linewidth": 1.0},
+        textprops={"fontsize": 10, "color": "black", "ha": "center"},
+    )
+    ax.axis("equal")
+    fig.tight_layout()
+    fig.savefig(chart_paths["rainy_ratio"], bbox_inches="tight")
+    plt.close(fig)
+    print(f"保存降雨分析图: {output_dir}")
+    return chart_paths
+
+
+def _pie_autopct(pct: float, total: int, label: str) -> str:
+    count = int(round(pct * total / 100.0))
+    return f"{label}\n{count}天\n{pct:.0f}%"
+
+
 def run_rainfall_analysis(
     rainfall_file: Path,
     combined_xlsx: Path,
@@ -639,6 +689,7 @@ def run_rainfall_analysis(
 
     # Sheet 1: 降雨日分析（概况 + 图表）
     _add_daily_analysis_sheet(combined_xlsx, daily_rain, rain_overview)
+    rainfall_chart_paths = _save_rainfall_png_charts(daily_rain, combined_xlsx.parent / "降雨分析图")
 
     # Sheet 2: 降雨场次分析
     if not event_rain.empty:
@@ -649,6 +700,7 @@ def run_rainfall_analysis(
         "event_rain": event_rain,
         "rain_data": rain_data,
         "rain_overview": rain_overview,
+        "rainfall_chart_paths": rainfall_chart_paths,
         "event_data_dict": event_data_dict,
         "freq": freq,
     }

@@ -38,7 +38,7 @@ def _load_dry_curve_data_from_excel(combined_xlsx: Path, logger: logging.Logger)
                 if data:
                     df = pd.DataFrame(data, columns=["时间", "流量(L/s)", "液位(m)", "流速(m/s)"])
                     df = df.dropna(subset=["时间"])
-                    df["时间"] = pd.date_range("00:00:00", "23:59:00", freq="T")[:len(df)]
+                    df["时间"] = pd.date_range("00:00:00", "23:59:00", freq="min")[:len(df)]
                     df = df.set_index("时间")
                     df = df.rename(columns={"流量(L/s)": "f", "液位(m)": "l", "流速(m/s)": "velo"})
                     dry_curve_data[point_name] = df
@@ -107,7 +107,7 @@ def run(
         output_file=output_file,
         dry_curve_data=dry_curve_data,
         filter_result_path=filter_result_path,
-        config=None,
+        config={"baseinfo_path": str(config.baseinfo_path)},
         has_rainfall_data=has_rainfall_data,
         llm_client=llm_client,
     )

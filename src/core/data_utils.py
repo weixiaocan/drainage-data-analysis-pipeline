@@ -8,6 +8,8 @@ from typing import Optional
 
 import pandas as pd
 
+from .schema import FLOW_COLUMN_ALIASES, find_column, parse_flow_filename
+
 
 def read_csv_with_fallback(path: Path) -> pd.DataFrame:
     """尝试多种编码读取 CSV 文件
@@ -46,23 +48,10 @@ def detect_flow_columns(df: pd.DataFrame) -> tuple[str, str, str, Optional[str]]
     Raises:
         ValueError: 无法识别必需列时抛出
     """
-    cols = [str(c).strip() for c in df.columns]
-
-    # 检测时间列
-    time_col = "数据时间" if "数据时间" in cols else next((c for c in cols if "时间" in c), None)
-    if time_col is None:
-        raise ValueError(f"无法识别时间列，可用列: {cols}")
-
-    # 检测流量列
-    flow_col = "流量(L/s)(均值)" if "流量(L/s)(均值)" in cols else next((c for c in cols if "流量" in c), None)
-    if flow_col is None:
-        raise ValueError(f"无法识别流量列，可用列: {cols}")
-
-    # 检测液位列（可选）
-    level_col = "液位(m)(均值)" if "液位(m)(均值)" in cols else next((c for c in cols if "液位" in c), None)
-
-    # 检测流速列（可选）
-    velocity_col = "流速(m/s)(均值)" if "流速(m/s)(均值)" in cols else next((c for c in cols if "流速" in c), None)
+    time_col = find_column(df, FLOW_COLUMN_ALIASES["timestamp"], required=True)
+    flow_col = find_column(df, FLOW_COLUMN_ALIASES["flow_lps"], required=True)
+    level_col = find_column(df, FLOW_COLUMN_ALIASES["level_m"], required=True)
+    velocity_col = find_column(df, FLOW_COLUMN_ALIASES["velocity_mps"], required=False)
 
     return time_col, flow_col, level_col, velocity_col
 
@@ -76,7 +65,7 @@ def parse_point_name(file_path: Path) -> str:
     Returns:
         点位编号（文件名去掉扩展名）
     """
-    return file_path.stem
+    return parse_flow_filename(file_path).point_id
 
 
 def detect_site_info_columns(df: pd.DataFrame) -> dict[str, Optional[str]]:

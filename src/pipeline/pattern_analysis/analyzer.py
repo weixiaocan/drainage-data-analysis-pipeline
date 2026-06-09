@@ -12,12 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.dates import DateFormatter, HourLocator
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from scipy.signal import find_peaks
+
+# 设置中文字体
+mpl.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei"]
+mpl.rcParams["font.serif"] = ["SimHei"]
+mpl.rcParams["axes.unicode_minus"] = False
 
 
 @dataclass
@@ -124,54 +132,79 @@ def _analyze_period(values: np.ndarray, index: pd.DatetimeIndex, start_min: int,
 
 
 def _extract_peak_valley_periods(curve: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """提取波峰时段和波谷时段"""
+    """提取波峰时段和波谷时段，返回小时级别的描述"""
     flow = curve["f"].values
     max_val = flow.max()
     min_val = flow.min()
+
+    # 如果最大最小值差异太小，返回空
+    if max_val - min_val < 0.1:
+        return [], []
+
     threshold = (max_val + min_val) / 2
 
     # 标记高于/低于阈值
     above = flow > threshold
     below = flow <= threshold
 
-    # 提取连续区间
-    peak_periods = _find_continuous_periods(curve.index, above, min_duration=30)
-    valley_periods = _find_continuous_periods(curve.index, below, min_duration=30)
+    # 提取连续区间（小时级别）
+    peak_hours = _extract_hours(curve.index, above, min_hours=1)
+    valley_hours = _extract_hours(curve.index, below, min_hours=2)
 
-    return peak_periods, valley_periods
+    # 只保留主要的时段（各2个以内）
+    return peak_hours[:2], valley_hours[:2]
 
 
-def _find_continuous_periods(index: pd.DatetimeIndex, mask: np.ndarray, min_duration: int = 30) -> list[str]:
-    """提取连续时段"""
-    periods = []
+def _extract_hours(index: pd.DatetimeIndex, mask: np.ndarray, min_hours: int = 1) -> list[str]:
+    """提取小时级别的时段描述"""
     if len(mask) == 0:
-        return periods
+        return []
 
-    in_period = False
-    start_idx = 0
+    # 统计每个小时中满足条件的时间点数量
+    hour_counts = {}  # {hour: count}
+    for i, t in enumerate(index):
+        h = t.hour
+        if mask[i]:
+            hour_counts[h] = hour_counts.get(h, 0) + 1
 
-    for i, val in enumerate(mask):
-        if val and not in_period:
-            in_period = True
-            start_idx = i
-        elif not val and in_period:
-            in_period = False
-            if i - start_idx >= min_duration:
-                start_time = index[start_idx].strftime("%H:%M")
-                end_time = index[i - 1].strftime("%H:%M")
-                periods.append(f"{start_time}~{end_time}")
+    # 只保留超过半小时的小时
+    valid_hours = sorted([h for h, c in hour_counts.items() if c >= 30])
 
-    # 处理末尾区间
-    if in_period and len(mask) - start_idx >= min_duration:
-        start_time = index[start_idx].strftime("%H:%M")
-        end_time = index[-1].strftime("%H:%M")
-        periods.append(f"{start_time}~{end_time}")
+    if not valid_hours:
+        return []
+
+    # 合并连续的小时为区间
+    periods = []
+    start = valid_hours[0]
+    end = valid_hours[0]
+
+    for h in valid_hours[1:]:
+        if h == end + 1:
+            end = h
+        else:
+            # 只保留时长足够的区间
+            duration = end - start + 1
+            if duration >= min_hours:
+                if start == end:
+                    periods.append(f"{start}点")
+                else:
+                    periods.append(f"{start}-{end}点")
+            start = h
+            end = h
+
+    # 添加最后一个区间
+    duration = end - start + 1
+    if duration >= min_hours:
+        if start == end:
+            periods.append(f"{start}点")
+        else:
+            periods.append(f"{start}-{end}点")
 
     return periods
 
 
 def _classify_pattern(features: dict) -> tuple[int, str]:
-    """规则分类
+    """规则分类（回退用）
 
     Returns:
         (category, reason)
@@ -179,74 +212,336 @@ def _classify_pattern(features: dict) -> tuple[int, str]:
     """
     kz = features.get("kz", 0)
     peak_count = features.get("peak_count", 0)
-    peak_significance = features.get("peak_significance", 0)
     peak_times = features.get("peak_times", [])
-    night_day_ratio = features.get("night_day_ratio", 0)
-    peak_valley_ratio = features.get("peak_valley_ratio", 0)
     mean_value = features.get("mean_value", 0)
 
-    # 第3类：流量极低
+    # 第3类：流量极低或曲线平坦
     if mean_value < 0.5:
-        return 3, f"流量接近零(均值={mean_value:.2f}L/s)"
-
-    # 第3类：峰谷比过低
-    if peak_valley_ratio < 1.5 and peak_valley_ratio < 99:
-        return 3, f"峰谷比={peak_valley_ratio:.2f}(<1.5)，曲线平坦"
-
-    # 第3类：Kz过低或峰不显著
-    if kz < 1.2 or peak_significance < 0.3:
-        return 3, f"曲线平坦(Kz={kz:.2f}, 峰显著性={peak_significance:.2f})"
+        return 3, "流量接近零"
+    if kz < 1.2:
+        return 3, f"Kz={kz:.2f}，曲线平坦"
 
     # 检查是否有早晚高峰
     has_morning_peak = any("06:" <= pt <= "10:59" for pt in peak_times)
-    has_evening_peak = any("18:" <= pt <= "22:59" for pt in peak_times)
+    has_evening_peak = any("17:" <= pt <= "22:59" for pt in peak_times)
 
-    # 夜间流量是否正常
-    night_normal = night_day_ratio < 0.5
+    # 第1类：符合生活规律（有早晚高峰）
+    if peak_count >= 1 and (has_morning_peak or has_evening_peak):
+        if 1.3 <= kz <= 3.0:
+            return 1, f"Kz={kz:.2f}，有早晚高峰特征"
 
-    # 第1类：符合生活规律
-    if peak_count >= 1 and (has_morning_peak or has_evening_peak) and night_normal:
-        if 1.3 <= kz <= 2.5:
-            peak_desc = []
-            if has_morning_peak:
-                peak_desc.append("早高峰")
-            if has_evening_peak:
-                peak_desc.append("晚高峰")
-            return 1, f"符合生活规律(Kz={kz:.2f}, 有{'/'.join(peak_desc)})"
+    # 第2类：不符合典型规律
+    return 2, f"Kz={kz:.2f}，波动特征不典型"
 
-    # 第2类：有波峰但不符合规律
-    if peak_count >= 1:
-        reasons = []
-        if not (has_morning_peak or has_evening_peak):
-            reasons.append(f"高峰时间异常({peak_times})")
-        if not (1.3 <= kz <= 2.5):
-            reasons.append(f"Kz={kz:.2f}超出正常范围")
-        if not night_normal:
-            reasons.append(f"夜间流量偏高(夜/日比={night_day_ratio:.2f})")
-        return 2, "; ".join(reasons) if reasons else "有波峰但不符合典型规律"
 
-    return 2, "特征不明确"
+def _analyze_with_llm(
+    point_name: str,
+    curve: pd.DataFrame,
+    features: dict,
+    peak_periods: list[str],
+    valley_periods: list[str],
+    llm_client,
+) -> tuple[int, str]:
+    """使用LLM分析排污规律
+
+    Args:
+        point_name: 点位名称
+        curve: 特征曲线数据
+        features: 计算得到的特征值
+        peak_periods: 波峰时段列表
+        valley_periods: 波谷时段列表
+        llm_client: LLM客户端
+
+    Returns:
+        (category, description)
+    """
+    import json
+
+    # 计算时段流量特征
+    flow = curve["f"].values
+    total_flow = flow.sum() if flow.sum() > 0 else 1
+
+    # 计算48个半小时平均值（每半小时30分钟）
+    halfhourly_avg = []
+    for i in range(48):
+        start = i * 30
+        end = (i + 1) * 30
+        halfhourly_avg.append(flow[start:end].mean())
+    # 格式化为 "0:00: x.xx, 0:30: x.xx, ..."
+    halfhourly_avg_str = ", ".join([f"{i//2}:{'00' if i%2==0 else '30'}: {v:.2f}" for i, v in enumerate(halfhourly_avg)])
+
+    # 夜间(0-7点)、早上(7-10点)、中午(11-15点)、下午(15-17点)、晚上(18-24点)
+    night_flow = flow[0:420].mean()          # 0:00-7:00
+    morning_flow = flow[420:600].mean()      # 7:00-10:00
+    noon_flow = flow[660:900].mean()         # 11:00-15:00
+    afternoon_flow = flow[900:1020].mean()   # 15:00-17:00
+    evening_flow = flow[1080:1440].mean()    # 18:00-24:00
+
+    night_ratio = flow[0:420].sum() / total_flow
+    morning_ratio = flow[420:600].sum() / total_flow
+    noon_ratio = flow[660:900].sum() / total_flow
+    afternoon_ratio = flow[900:1020].sum() / total_flow
+    evening_ratio = flow[1080:1440].sum() / total_flow
+
+    # 加载prompt模板
+    try:
+        prompt_template = llm_client.load_prompt("pattern_analysis")
+    except FileNotFoundError:
+        # 如果模板不存在，使用内置模板
+        prompt_template = """你是一个排水管网分析专家，请根据统计数据判断排污规律特征。
+
+点位编号：{point_name}
+统计数据：
+- 日均流量：{mean_flow:.2f} L/s
+- 时变化系数Kz：{kz:.2f}
+- 峰谷比：{peak_valley_ratio:.2f}
+- 峰值时间：{peak_times}
+- 流量较高时段：{peak_periods}
+- 流量较低时段：{valley_periods}
+- 夜间(0-6点)占比：{night_ratio:.1%}
+- 早间(6-12点)占比：{morning_ratio:.1%}
+- 下午(12-18点)占比：{afternoon_ratio:.1%}
+- 晚间(18-24点)占比：{evening_ratio:.1%}
+
+请判断分类并生成简要描述（分类：1类=符合生活规律，2类=不典型，3类=平坦）。
+输出JSON格式，包含category和description两个字段。"""
+
+    # 填充模板
+    prompt = prompt_template.format(
+        point_name=point_name,
+        mean_flow=features.get("mean_value", 0),
+        max_flow=features.get("peak_value", 0),
+        min_flow=features.get("min_value", 0),
+        kz=features.get("kz", 0),
+        peak_valley_ratio=features.get("peak_valley_ratio", 0),
+        peak_count=features.get("peak_count", 0),
+        peak_times="、".join(features.get("peak_times", [])),
+        peak_periods="、".join(peak_periods) if peak_periods else "无",
+        valley_periods="、".join(valley_periods) if valley_periods else "无",
+        halfhourly_avg=halfhourly_avg_str,
+        night_avg=night_flow,
+        morning_avg=morning_flow,
+        noon_avg=noon_flow,
+        afternoon_avg=afternoon_flow,
+        evening_avg=evening_flow,
+        night_ratio=night_ratio,
+        morning_ratio=morning_ratio,
+        noon_ratio=noon_ratio,
+        afternoon_ratio=afternoon_ratio,
+        evening_ratio=evening_ratio,
+    )
+
+    try:
+        # 调用LLM（使用JSON格式）
+        response = llm_client.chat_json(prompt, temperature=0.1)
+
+        # 解析JSON响应
+        result = json.loads(response)
+        category = int(result.get("category", 2))
+        description = _description_from_llm_result(result)
+
+        # 确保分类在有效范围内
+        if category not in [1, 2, 3]:
+            category = 2
+
+        kz = features.get("kz", 0)
+        mean_val = features.get("mean_value", 0)
+        max_val = features.get("peak_value", 0)
+        min_val = features.get("min_value", 0)
+        peak_count = features.get("peak_count", 0)
+        peak_times = features.get("peak_times", [])
+
+        # 计算波动范围
+        fluctuation = (max_val - min_val) / mean_val if mean_val > 0 else 0
+
+        # 检查是否有周期性规律（波峰分散在全天各时段，且波峰显著高于日均）
+        # 周期性规律：至少4个波峰，且波峰不在早/午/晚三个生活用水高峰时段内集中
+        def has_periodic_pattern(peak_times, peak_count, curve_df, mean_val):
+            if peak_count < 4:
+                return False
+            # 检查是否有深夜波峰（0-5点），且波峰值 > 日均
+            # 只有显著的深夜波峰才算周期性规律
+            night_peaks = []
+            for t in peak_times:
+                if "00:" <= t <= "04:59":
+                    # 获取该时间点的流量值
+                    hour, minute = int(t[:2]), int(t[3:5])
+                    idx = hour * 60 + minute
+                    if idx < len(curve_df):
+                        val = curve_df["f"].iloc[idx]
+                        # 波峰必须 > 日均才算显著深夜波峰
+                        if val > mean_val:
+                            night_peaks.append(t)
+            # 如果有显著的深夜波峰，说明是周期性规律
+            return len(night_peaks) > 0
+
+        periodic = has_periodic_pattern(peak_times, peak_count, curve, mean_val)
+
+        # 强制规则：Kz<1.2 的点位处理
+        if kz < 1.2:
+            if periodic:
+                category = 2
+                description = f"Kz={kz:.2f}<1.2但有周期性规律，{description}"
+            else:
+                category = 3
+                description = f"Kz={kz:.2f}<1.2，波动范围{fluctuation*100:.0f}%<30%且波峰数{peak_count}<4，曲线平坦"
+
+        # 强制规则：Kz>=1.2 时，先检查周期性规律，再检查第1类条件
+        elif kz >= 1.2:
+            if periodic:
+                # 有周期性规律，归为第2类
+                if category != 2:
+                    category = 2
+                    description = f"一天内出现{peak_count}个波峰，呈锯齿状规律涨落，疑似泵站调控"
+            else:
+                # 检查第1类条件
+                # 1. 夜间流量最低
+                night = features.get("night", {}).get("mean", 0)
+                morning = features.get("morning_peak", {}).get("mean", 0)
+                evening = features.get("evening_peak", {}).get("mean", 0)
+                daytime = features.get("daytime", {}).get("mean", 0)
+
+                night_is_lowest = night < morning and night < evening and night < daytime
+
+                # 2. 晚上有明显高峰
+                evening_max = features.get("evening_peak", {}).get("max", 0)
+                evening_has_peak = evening_max > mean_val * 1.15 if mean_val > 0 else False
+
+                # 3. 早上或中午有高峰（峰值>日均即可）
+                morning_max = features.get("morning_peak", {}).get("max", 0)
+                morning_has_peak = morning_max > mean_val if mean_val > 0 else False
+
+                if night_is_lowest and evening_has_peak and morning_has_peak:
+                    # 符合第1类条件
+                    if category != 1:
+                        category = 1
+                        description = f"夜间流量最低，晚上高峰明显(峰值{evening_max:.1f}L/s为日均{mean_val:.1f}的{evening_max/mean_val:.1f}倍)，早上有小高峰，符合典型生活用水排放规律"
+
+        return category, _build_report_description(point_name, features, category, peak_periods, valley_periods, description)
+
+    except Exception as e:
+        # LLM调用失败，回退到规则判断
+        print(f"LLM分析失败({point_name}): {e}，使用规则判断")
+        category, reason = _classify_pattern(features)
+        description = _build_report_description(point_name, features, category, peak_periods, valley_periods, "")
+        return category, description
+
+
+def _description_from_llm_result(result: dict) -> str:
+    """Extract a report-ready description from the structured LLM response."""
+    parts: list[str] = []
+    for key in ("description", "curve_description", "short_conclusion", "cause_reasoning"):
+        value = str(result.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    findings = result.get("key_findings") or []
+    if isinstance(findings, list):
+        for item in findings[:2]:
+            text = str(item or "").strip()
+            if text:
+                parts.append(text)
+    causes = result.get("possible_causes") or []
+    if isinstance(causes, list) and causes:
+        cause_text = "、".join(str(item).strip() for item in causes if str(item).strip())
+        if cause_text:
+            parts.append(f"可能原因包括{cause_text}")
+    return "；".join(_dedupe_text_parts(parts))
+
+
+def _build_report_description(
+    point_name: str,
+    features: dict,
+    category: int,
+    peak_periods: list[str],
+    valley_periods: list[str],
+    base_description: str = "",
+) -> str:
+    """Build a complete sentence suitable for both Excel review and report reuse."""
+    category_names = {
+        1: "第1类，符合生活用水规律",
+        2: "第2类，有波峰或波谷但不符合典型生活用水规律",
+        3: "第3类，曲线平坦或无明显波峰波谷",
+    }
+    parts = [f"{point_name}点位属于{category_names.get(category, '未分类')}"]
+    kz = features.get("kz", 0)
+    peak_count = features.get("peak_count", 0)
+    peak_valley_ratio = features.get("peak_valley_ratio", 0)
+    parts.append(f"时变化系数Kz为{kz:.2f}，识别到{peak_count}个波峰")
+    if peak_valley_ratio and peak_valley_ratio < 99:
+        parts.append(f"峰谷比为{peak_valley_ratio:.2f}")
+    period_summary = _build_period_summary(features)
+    if period_summary:
+        parts.append(period_summary)
+    if peak_periods:
+        parts.append(f"按小时阈值识别的相对高流量区间为{'、'.join(peak_periods)}")
+    if valley_periods:
+        parts.append(f"相对低流量区间为{'、'.join(valley_periods)}")
+    if base_description:
+        parts.append(base_description.rstrip("。"))
+    else:
+        parts.append(_fallback_pattern_sentence(category))
+    return "。".join(_dedupe_text_parts(parts)) + "。"
+
+
+def _fallback_pattern_sentence(category: int) -> str:
+    if category == 1:
+        return "曲线在日间或晚间用水时段出现抬升、夜间回落，整体符合生活污水排放规律"
+    if category == 2:
+        return "曲线存在明显波动，但高低峰出现时段与典型居民生活用水规律不完全一致，需结合汇水范围判断是否受工业排放、商业活动或泵站调度影响"
+    if category == 3:
+        return "流量曲线整体较为平坦，未形成清晰的早晚高峰特征，需关注持续入渗或恒定排放影响"
+    return "流量曲线特征不明确，建议结合现场汇水范围进一步核查"
+
+
+def _build_period_summary(features: dict) -> str:
+    labels = [
+        ("夜间1:00-5:00", features.get("night", {}).get("mean", 0)),
+        ("早间6:00-11:00", features.get("morning_peak", {}).get("mean", 0)),
+        ("日间6:00-24:00", features.get("daytime", {}).get("mean", 0)),
+        ("晚间18:00-24:00", features.get("evening_peak", {}).get("mean", 0)),
+    ]
+    if not any(value > 0 for _, value in labels):
+        return ""
+    highest_label, highest_value = max(labels, key=lambda item: item[1])
+    lowest_label, lowest_value = min(labels, key=lambda item: item[1])
+    night = features.get("night", {}).get("mean", 0)
+    morning = features.get("morning_peak", {}).get("mean", 0)
+    evening = features.get("evening_peak", {}).get("mean", 0)
+    daytime = features.get("daytime", {}).get("mean", 0)
+
+    statements = [
+        f"分时段均值显示，{highest_label}平均流量最高（{highest_value:.2f}L/s），{lowest_label}平均流量最低（{lowest_value:.2f}L/s）"
+    ]
+    if night < morning and night < evening and night < daytime:
+        statements.append("夜间低流量特征较明显")
+    else:
+        statements.append("夜间流量未表现为全天最低，排放规律与典型居民生活污水存在差异")
+    evening_peak_clear = daytime > 0 and evening > daytime * 1.1
+    morning_peak_clear = daytime > 0 and morning > daytime * 1.1
+    if evening_peak_clear:
+        statements.append("晚间高峰较明显")
+    elif morning_peak_clear:
+        statements.append("早间高峰较明显")
+    else:
+        statements.append("早晚高峰不突出")
+    return "，".join(statements)
+
+
+def _dedupe_text_parts(parts: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = str(part or "").strip().strip("。；;")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _build_description(features: dict, category: int, peak_periods: list[str], valley_periods: list[str]) -> str:
-    """生成排污规律描述"""
-    if category == 1:
-        desc = "流量特征曲线呈现明显的波峰和波谷特征，符合居民生活污水排放规律。"
-        if peak_periods:
-            desc += f"波峰主要出现在{'、'.join(peak_periods[:3])}，与早晚用水高峰期相吻合。"
-        if valley_periods:
-            desc += f"波谷主要出现在{'、'.join(valley_periods[:2])}，与夜间和午间用水低峰期一致。"
-    elif category == 2:
-        desc = "流量特征曲线有波峰或波谷，但不符合典型的生活污水排放规律。"
-        if peak_periods:
-            desc += f"波峰主要出现在{'、'.join(peak_periods[:3])}。"
-        if valley_periods:
-            desc += f"波谷主要出现在{'、'.join(valley_periods[:2])}。"
-        desc += "可能受下游泵站启停、管道顶托或其他因素影响。"
-    else:
-        desc = "流量特征曲线无明显波峰波谷特征，曲线较为平坦，建议进一步排查管道运行状况。"
-
-    return desc
+    """生成排污规律描述（兼容旧调用）"""
+    return _build_report_description("该", features, category, peak_periods, valley_periods)
 
 
 def _save_to_excel(data: pd.DataFrame, excel_path: Path, sheet_name: str, headers: list[str]) -> None:
@@ -289,6 +584,7 @@ def run_pattern_analysis(
     dry_curve_data: dict[str, pd.DataFrame],
     combined_xlsx: Path,
     config: dict[str, Any] | None = None,
+    llm_client=None,
 ) -> dict[str, Any]:
     """执行排污规律分析
 
@@ -296,6 +592,7 @@ def run_pattern_analysis(
         dry_curve_data: 旱天特征曲线数据（从内存传入）
         combined_xlsx: 综合分析结果 xlsx 文件（输出）
         config: 可选配置参数
+        llm_client: LLM客户端（可选，用于生成描述）
 
     Returns:
         {
@@ -320,11 +617,15 @@ def run_pattern_analysis(
         # 提取波峰波谷时段
         peak_periods, valley_periods = _extract_peak_valley_periods(curve)
 
-        # 分类
-        category, reason = _classify_pattern(features)
-
-        # 生成描述
-        description = _build_description(features, category, peak_periods, valley_periods)
+        # 使用LLM分析（如果可用）
+        if llm_client is not None:
+            category, description = _analyze_with_llm(
+                point_name, curve, features, peak_periods, valley_periods, llm_client
+            )
+        else:
+            # 回退到规则判断
+            category, reason = _classify_pattern(features)
+            description = _build_report_description(point_name, features, category, peak_periods, valley_periods)
 
         # 分类名称
         category_names = {
@@ -333,6 +634,9 @@ def run_pattern_analysis(
             3: "第3类-曲线平坦/异常",
         }
 
+        # 简化的理由
+        reason = f"Kz={features['kz']:.2f}"
+
         row = {
             "点位编号": point_name,
             "分类": category,
@@ -340,8 +644,8 @@ def run_pattern_analysis(
             "Kz值": round(features["kz"], 2),
             "峰谷比": round(features["peak_valley_ratio"], 2) if features["peak_valley_ratio"] < 99 else "N/A",
             "峰数量": features["peak_count"],
-            "波峰时段": "、".join(peak_periods[:3]) if peak_periods else "",
-            "波谷时段": "、".join(valley_periods[:2]) if valley_periods else "",
+            "波峰时段": "、".join(peak_periods) if peak_periods else "",
+            "波谷时段": "、".join(valley_periods) if valley_periods else "",
             "诊断理由": reason,
             "排污规律描述": description,
         }
@@ -371,3 +675,218 @@ def run_pattern_analysis(
         "pattern_df": pattern_df,
         "descriptions": descriptions,
     }
+
+
+def draw_dry_flow_curve(
+    dry_curve_data: dict[str, pd.DataFrame],
+    dry_curve_data_workday: dict[str, pd.DataFrame],
+    dry_curve_data_weekend: dict[str, pd.DataFrame],
+    flow_data: dict[str, pd.DataFrame],
+    dry_days: dict[str, list[str]],
+    day_num: pd.DataFrame,
+    output_dir: Path,
+) -> int:
+    """绘制流量特征曲线（按照原格式）
+
+    Args:
+        dry_curve_data: 总体特征曲线
+        dry_curve_data_workday: 工作日特征曲线
+        dry_curve_data_weekend: 周末特征曲线
+        flow_data: 原始流量数据
+        dry_days: 各点位旱天日期列表
+        day_num: 工作日/周末天数统计
+        output_dir: 输出目录
+
+    Returns:
+        生成的图表数量
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+
+    for point_name in dry_curve_data.keys():
+        # 获取所有旱天数据
+        point_dry_days = dry_days.get(point_name, [])
+        num_of_day = len(point_dry_days)
+        if num_of_day == 0:
+            continue
+
+        # 构建每日流量数据（不强制要求1440行）
+        day_index = pd.date_range("00:00:00", "23:59:00", freq="min")
+        dry_flow_each_day_df = pd.DataFrame(index=day_index)
+
+        if point_name in flow_data:
+            df = flow_data[point_name]
+            for date in point_dry_days:
+                day_data = df[df["数据时间"].dt.strftime("%Y-%m-%d") == date]["f"].values
+                if len(day_data) > 0:
+                    # 使用实际数据长度，填充到1440
+                    padded_data = np.zeros(1440)
+                    padded_data[:len(day_data)] = day_data[:1440]
+                    dry_flow_each_day_df[date] = padded_data
+
+        if dry_flow_each_day_df.empty or dry_flow_each_day_df.shape[1] == 0:
+            continue
+
+        valid_days = list(dry_flow_each_day_df.columns)
+
+        # 绘图
+        fig = plt.figure(figsize=(10, 5), dpi=120)
+        ax1 = fig.add_subplot(1, 1, 1)
+
+        # 每日曲线用灰色显示
+        num_valid = len(valid_days)
+        if num_valid == 1:
+            dry_flow_each_day_df[valid_days[0]].plot(ax=ax1, color="#D3D3D3", label="每日流量", legend=True, alpha=0.5)
+        elif num_valid > 1:
+            for j in range(num_valid - 1):
+                dry_flow_each_day_df[valid_days[j]].plot(ax=ax1, color="#D3D3D3", label="", legend=False, alpha=0.5)
+            dry_flow_each_day_df[valid_days[-1]].plot(ax=ax1, color="#D3D3D3", label="每日流量", legend=True, alpha=0.5)
+
+        # 特征曲线
+        workday_num = day_num.loc[point_name, "工作日天数"] if point_name in day_num.index else 0
+        weekend_num = day_num.loc[point_name, "周末天数"] if point_name in day_num.index else 0
+
+        if workday_num != 0 and weekend_num != 0:
+            dry_curve_data[point_name]["f"].plot(ax=ax1, color="#1E90FF", label="流量特征曲线_总体", legend=True)
+        else:
+            dry_curve_data[point_name]["f"].plot(ax=ax1, color="#1E90FF", label="流量特征曲线", legend=True)
+
+        # 图形设计
+        ax1.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+        ax1.xaxis.set_major_locator(HourLocator(byhour=range(0, 24, 2)))
+        ax1.set_xlabel("时间")
+        ax1.set_ylabel("流量/(L/s)")
+
+        plt.tight_layout()
+        img_path = output_dir / f"{point_name}_流量特征曲线.png"
+        plt.savefig(img_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        count += 1
+
+    print(f"生成流量特征曲线图: {count} 张")
+    return count
+
+
+def draw_dry_level_curve(
+    dry_curve_data: dict[str, pd.DataFrame],
+    dry_curve_data_workday: dict[str, pd.DataFrame],
+    dry_curve_data_weekend: dict[str, pd.DataFrame],
+    flow_data: dict[str, pd.DataFrame],
+    dry_days: dict[str, list[str]],
+    day_num: pd.DataFrame,
+    output_dir: Path,
+) -> int:
+    """绘制液位特征曲线（按照原格式）
+
+    Args:
+        dry_curve_data: 总体特征曲线
+        dry_curve_data_workday: 工作日特征曲线
+        dry_curve_data_weekend: 周末特征曲线
+        flow_data: 原始流量数据
+        dry_days: 各点位旱天日期列表
+        day_num: 工作日/周末天数统计
+        output_dir: 输出目录
+
+    Returns:
+        生成的图表数量
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+
+    for point_name in dry_curve_data.keys():
+        point_dry_days = dry_days.get(point_name, [])
+        num_of_day = len(point_dry_days)
+        if num_of_day == 0:
+            continue
+
+        # 构建每日液位数据（不强制要求1440行）
+        day_index = pd.date_range("00:00:00", "23:59:00", freq="min")
+        dry_level_each_day_df = pd.DataFrame(index=day_index)
+
+        if point_name in flow_data:
+            df = flow_data[point_name]
+            for date in point_dry_days:
+                day_data = df[df["数据时间"].dt.strftime("%Y-%m-%d") == date]["l"].values
+                if len(day_data) > 0:
+                    # 使用实际数据长度，填充到1440
+                    padded_data = np.zeros(1440)
+                    padded_data[:len(day_data)] = day_data[:1440]
+                    dry_level_each_day_df[date] = padded_data
+
+        if dry_level_each_day_df.empty or dry_level_each_day_df.shape[1] == 0:
+            continue
+
+        valid_days = list(dry_level_each_day_df.columns)
+
+        # 绘图
+        fig = plt.figure(figsize=(10, 5), dpi=120)
+        ax1 = fig.add_subplot(1, 1, 1)
+
+        # 每日液位曲线用灰色显示
+        num_valid = len(valid_days)
+        if num_valid == 1:
+            dry_level_each_day_df[valid_days[0]].plot(ax=ax1, color="#D3D3D3", label="每日液位", legend=True, alpha=0.5)
+        elif num_valid > 1:
+            for j in range(num_valid - 1):
+                dry_level_each_day_df[valid_days[j]].plot(ax=ax1, color="#D3D3D3", label="", legend=False, alpha=0.5)
+            dry_level_each_day_df[valid_days[-1]].plot(ax=ax1, color="#D3D3D3", label="每日液位", legend=True, alpha=0.5)
+
+        # 特征曲线
+        workday_num = day_num.loc[point_name, "工作日天数"] if point_name in day_num.index else 0
+        weekend_num = day_num.loc[point_name, "周末天数"] if point_name in day_num.index else 0
+
+        if workday_num != 0 and weekend_num != 0:
+            dry_curve_data[point_name]["l"].plot(ax=ax1, label="液位特征曲线", color="#1E90FF", legend=True)
+        else:
+            dry_curve_data[point_name]["l"].plot(ax=ax1, label="液位特征曲线", color="#1E90FF", legend=True)
+
+        # 图形设计
+        ax1.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+        ax1.xaxis.set_major_locator(HourLocator(byhour=range(0, 24, 2)))
+        ax1.set_xlabel("时间")
+        ax1.set_ylabel("液位/(m)")
+
+        plt.tight_layout()
+        img_path = output_dir / f"{point_name}_液位特征曲线.png"
+        plt.savefig(img_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        count += 1
+
+    print(f"生成液位特征曲线图: {count} 张")
+    return count
+
+
+def generate_curve_charts(
+    dry_curve_data: dict[str, pd.DataFrame],
+    dry_curve_data_workday: dict[str, pd.DataFrame],
+    dry_curve_data_weekend: dict[str, pd.DataFrame],
+    flow_data: dict[str, pd.DataFrame],
+    dry_days: dict[str, list[str]],
+    day_num: pd.DataFrame,
+    output_dir: Path,
+) -> dict[str, int]:
+    """生成所有特征曲线图表
+
+    Args:
+        dry_curve_data: 总体特征曲线
+        dry_curve_data_workday: 工作日特征曲线
+        dry_curve_data_weekend: 周末特征曲线
+        flow_data: 原始流量数据
+        dry_days: 各点位旱天日期列表
+        day_num: 工作日/周末天数统计
+        output_dir: 输出目录
+
+    Returns:
+        {"flow_charts": 流量图数量, "level_charts": 液位图数量}
+    """
+    flow_count = draw_dry_flow_curve(
+        dry_curve_data, dry_curve_data_workday, dry_curve_data_weekend,
+        flow_data, dry_days, day_num, output_dir
+    )
+
+    level_count = draw_dry_level_curve(
+        dry_curve_data, dry_curve_data_workday, dry_curve_data_weekend,
+        flow_data, dry_days, day_num, output_dir
+    )
+
+    return {"flow_charts": flow_count, "level_charts": level_count}

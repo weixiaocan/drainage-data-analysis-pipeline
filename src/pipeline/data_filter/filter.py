@@ -8,11 +8,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, PatternFill, Side
 
-from src.core.data_utils import detect_flow_columns, parse_point_name, read_csv_with_fallback
+from src.core.data_utils import read_csv_with_fallback
+from src.core.schema import flow_to_legacy_df, normalize_flow_df, normalize_rainfall_df, parse_flow_filename
 
 
 @dataclass
@@ -41,40 +43,29 @@ def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
     result: dict[str, pd.DataFrame] = {}
     for csv_path in sorted(csv_dir.glob("*.csv")):
         df = read_csv_with_fallback(csv_path)
-        time_col, flow_col, level_col, velocity_col = detect_flow_columns(df)
+        df = flow_to_legacy_df(normalize_flow_df(df, csv_path))
+        df = df.rename(columns={"f": "__flow__", "l": "__level__", "velo": "__velocity__"})
 
-        df = df.rename(columns={time_col: "数据时间", flow_col: "__flow__", level_col: "__level__"})
-        if velocity_col:
-            df = df.rename(columns={velocity_col: "__velocity__"})
-        df["数据时间"] = pd.to_datetime(df["数据时间"], errors="coerce")
-        df = df.dropna(subset=["数据时间"]).copy()
-        df["__flow__"] = pd.to_numeric(df["__flow__"], errors="coerce").fillna(0.0)
-        df["__level__"] = pd.to_numeric(df["__level__"], errors="coerce").fillna(0.0)
-        if "__velocity__" in df.columns:
-            df["__velocity__"] = pd.to_numeric(df["__velocity__"], errors="coerce").fillna(0.0)
-
-        point_name = parse_point_name(csv_path)
+        point_name = parse_flow_filename(csv_path).point_id
         result[point_name] = df.sort_values("数据时间")
     return result
 
 
 def _load_rainfall_daily(rainfall_file: Path) -> pd.Series:
-    """加载降雨数据，按日汇总"""
-    rain = read_csv_with_fallback(rainfall_file)
-    # 检测时间列和雨量列
-    time_col = "t" if "t" in rain.columns else next((c for c in rain.columns if "time" in str(c).lower() or "时间" in str(c)), None)
-    rain_col = "rain" if "rain" in rain.columns else next((c for c in rain.columns if "rain" in str(c).lower() or "雨" in str(c)), None)
+    """加载降雨数据，按日汇总
 
-    if time_col is None:
-        raise ValueError(f"无法识别降雨数据时间列，可用列: {list(rain.columns)}")
-    if rain_col is None:
-        raise ValueError(f"无法识别降雨数据雨量列，可用列: {list(rain.columns)}")
+    如果文件不存在或无法解析，返回空 Series（仅进行旱天分析）
+    """
+    if not rainfall_file.exists():
+        return pd.Series(dtype="float64")
 
-    rain[time_col] = pd.to_datetime(rain[time_col], errors="coerce")
-    rain[rain_col] = pd.to_numeric(rain[rain_col], errors="coerce").fillna(0.0)
-    rain = rain.dropna(subset=[time_col]).copy()
-    rain["date"] = rain[time_col].dt.date
-    return rain.groupby("date")[rain_col].sum()
+    try:
+        rain = read_csv_with_fallback(rainfall_file)
+        rain = normalize_rainfall_df(rain)
+        rain["date"] = rain["timestamp"].dt.date
+        return rain.groupby("date")["rain_mm"].sum()
+    except Exception:
+        return pd.Series(dtype="float64")
 
 
 def _calculate_daily_flow(day_groups: dict[date, pd.DataFrame], flow_col: str) -> pd.Series:
@@ -341,8 +332,13 @@ def _write_filter_excel(
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+        # 始终添加雨量行，无数据时留空
+        if not rain_daily.empty:
+            rain_values = [float(rain_daily.get(pd.Timestamp(c).date(), 0.0)) for c in date_labels]
+        else:
+            rain_values = [np.nan] * len(date_labels)
         rain_row = pd.DataFrame(
-            [[float(rain_daily.get(pd.Timestamp(c).date(), 0.0)) for c in date_labels]],
+            [rain_values],
             columns=date_labels,
             index=["当天雨量"],
         )
@@ -390,10 +386,12 @@ def _apply_formatting(
     # 添加筛选说明列
     note_col = ws.max_column + 1
     ws.cell(row=1, column=note_col).value = "筛选说明"
+    rain_row_num = None  # 记录雨量行的行号
     for row in range(2, ws.max_row + 1):
         point_name = str(ws.cell(row=row, column=1).value or "")
         if point_name == "当天雨量":
             ws.cell(row=row, column=note_col).value = "雨量参考行"
+            rain_row_num = row
             continue
         if point_name in notes:
             ws.cell(row=row, column=note_col).value = "；".join(notes[point_name])
@@ -404,7 +402,11 @@ def _apply_formatting(
             cell.alignment = center_alignment
             cell.border = full_border
             if cell.value is None and cell.column < note_col:
-                cell.value = "--"
+                # 雨量行保持为空，其他行显示 "--"
+                if rain_row_num and cell.row == rain_row_num:
+                    cell.value = ""
+                else:
+                    cell.value = "--"
                 cell.fill = empty_fill
 
 

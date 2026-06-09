@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.core.data_utils import detect_flow_columns, parse_point_name, read_csv_with_fallback
+from src.core.data_utils import read_csv_with_fallback
+from src.core.schema import normalize_flow_df, parse_flow_filename
 
 
 def calculate_point_stats(csv_path: Path) -> dict:
@@ -28,16 +29,14 @@ def calculate_point_stats(csv_path: Path) -> dict:
     """
     # 读取数据
     df = read_csv_with_fallback(csv_path)
+    df = normalize_flow_df(df, csv_path)
 
     # 解析点位编号
-    point_name = parse_point_name(csv_path)
-
-    # 检测列名
-    time_col, _, _, _ = detect_flow_columns(df)
+    point_name = parse_flow_filename(csv_path).point_id
 
     # 解析时间列
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-    df = df.dropna(subset=[time_col])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp"])
 
     if df.empty:
         return {
@@ -52,8 +51,8 @@ def calculate_point_stats(csv_path: Path) -> dict:
     record_count = len(df)
 
     # 计算监测天数（时间跨度）
-    min_time = df[time_col].min()
-    max_time = df[time_col].max()
+    min_time = df["timestamp"].min()
+    max_time = df["timestamp"].max()
     monitoring_days = (max_time.date() - min_time.date()).days + 1
 
     # 计算理论数据条数
@@ -112,7 +111,6 @@ def calculate_all_stats(flow_data_dir: Path) -> pd.DataFrame:
         }
     )
 
-    # 转换收集率为百分比，保留两位小数
-    df["数据收集率(%)"] = (df["数据收集率(%)"] * 100).round(2)
+    # 收集率保持小数形式，写入 Excel 时设置百分比格式
 
     return df

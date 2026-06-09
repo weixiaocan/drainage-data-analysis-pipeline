@@ -20,6 +20,9 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+from src.core.data_utils import read_csv_with_fallback
+from src.core.schema import flow_to_legacy_df, normalize_flow_df, parse_flow_filename
+
 # 配置中文字体
 mpl.rcParams['font.sans-serif'] = ['SimHei']
 mpl.rcParams['font.serif'] = ['SimHei']
@@ -71,20 +74,10 @@ def _load_flow_data(csv_dir: Path) -> dict[str, pd.DataFrame]:
     """加载流量数据"""
     result: dict[str, pd.DataFrame] = {}
     for csv_path in sorted(csv_dir.glob("*.csv")):
-        df = _read_csv_with_fallback(csv_path)
-        time_col, flow_col, level_col, velocity_col = _detect_columns(df)
+        df = read_csv_with_fallback(csv_path)
+        df = flow_to_legacy_df(normalize_flow_df(df, csv_path))
 
-        rename_map = {time_col: "数据时间", flow_col: "f", level_col: "l"}
-        if velocity_col:
-            rename_map[velocity_col] = "velo"
-        df = df.rename(columns=rename_map)
-
-        df["数据时间"] = pd.to_datetime(df["数据时间"], errors="coerce")
-        df = df.dropna(subset=["数据时间"]).copy()
-        df["f"] = pd.to_numeric(df["f"], errors="coerce").fillna(0.0)
-        df["l"] = pd.to_numeric(df["l"], errors="coerce").fillna(0.0)
-
-        point_name = _parse_point_name(csv_path)
+        point_name = parse_flow_filename(csv_path).point_id
         result[point_name] = df.sort_values("数据时间").reset_index(drop=True)
     return result
 
