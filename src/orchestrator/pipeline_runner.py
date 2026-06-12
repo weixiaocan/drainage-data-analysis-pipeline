@@ -34,6 +34,7 @@ class ModuleInfo:
     # 上游数据依赖
     needs_dry_curve_data: bool = False
     needs_event_data: bool = False
+    needs_rain_data: bool = False  # 需要降雨数据（用于绑制 RDII 曲线）
 
     # 条件执行
     condition: str | None = None  # "has_rainfall_data" 或 None
@@ -89,6 +90,12 @@ class PipelineState:
             return self.data["rainfall_analysis"].get("event_data_dict")
         return None
 
+    def get_rain_data(self) -> pd.DataFrame | None:
+        """获取降雨数据（从 rainfall_analysis 模块）"""
+        if "rainfall_analysis" in self.data:
+            return self.data["rainfall_analysis"].get("rain_data")
+        return None
+
 
 class Orchestrator:
     """
@@ -116,7 +123,7 @@ class Orchestrator:
         ModuleInfo("event_stats", "src.pipeline.event_stats.runner", critical=False, needs_event_data=True, condition="has_rainfall_data"),
         ModuleInfo("pattern_analysis", "src.pipeline.pattern_analysis.runner", critical=True, needs_dry_curve_data=True),
         # === 介入点 3 ===
-        ModuleInfo("rdii_analysis", "src.pipeline.rdii_analysis.runner", critical=False, needs_dry_curve_data=True, needs_event_data=True, condition="has_rainfall_data"),
+        ModuleInfo("rdii_analysis", "src.pipeline.rdii_analysis.runner", critical=False, needs_dry_curve_data=True, needs_event_data=True, needs_rain_data=True, condition="has_rainfall_data"),
         ModuleInfo("risk_analysis", "src.pipeline.risk_analysis.runner", critical=True, needs_event_data=True),
         ModuleInfo("report_assembler", "src.pipeline.report_assembler.runner", critical=True, needs_dry_curve_data=True),
     ]
@@ -360,6 +367,12 @@ class Orchestrator:
             if event_data:
                 kwargs["event_data"] = event_data
                 self._log("info", f"  传递上游数据: event_data ({len(event_data)} 个场次)")
+
+        if module_info.needs_rain_data:
+            rain_data = self.state.get_rain_data()
+            if rain_data is not None:
+                kwargs["rain_data"] = rain_data
+                self._log("info", f"  传递上游数据: rain_data ({len(rain_data)} 条记录)")
 
         # 为 risk_analysis 和 report_assembler 传递 has_rainfall_data 参数
         if module_info.name in ("risk_analysis", "report_assembler"):
