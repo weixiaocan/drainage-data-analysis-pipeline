@@ -306,11 +306,16 @@ def _get_dry_flow_sta(
     dry_curve_data: dict[str, pd.DataFrame],
     site_info: dict[str, dict[str, float]],
 ) -> pd.DataFrame:
-    """计算旱天统计值"""
+    """计算旱天统计值
+
+    统计口径：
+    - 日均流量：所有筛选天日平均流量的平均值
+    - 日最大流量：筛选天中日均流量最大的那天的日平均流量
+    - 日最小流量：筛选天中日均流量最小的那天的日平均流量
+    """
     rows: list[dict[str, Any]] = []
 
     for point_name in dry_curve_data.keys():
-        curve_df = dry_curve_data[point_name]
         flow_df = dry_flow.get(point_name)
 
         if flow_df is None:
@@ -321,11 +326,24 @@ def _get_dry_flow_sta(
         diameter = info["diameter"]
         depth = info["depth"]
 
+        # 按天计算日平均流量
+        flow_df = flow_df.copy()
+        flow_df["日期"] = flow_df["数据时间"].dt.date
+        daily_means = flow_df.groupby("日期")["f"].mean()  # 每天的日平均流量 (L/s)
+
+        if len(daily_means) == 0:
+            continue
+
+        # 日级别统计
+        daily_avg_flow = daily_means.mean()  # 所有天日平均流量的平均值
+        daily_max_flow = daily_means.max()   # 日均流量最大的那天的流量
+        daily_min_flow = daily_means.min()   # 日均流量最小的那天的流量
+
         row = {
             "点位编号": point_name,
-            "日均流量(m³/d)": round(curve_df["f"].mean() * 86.4, 2),
-            "日最大流量(L/s)": round(curve_df["f"].max(), 2),
-            "日最小流量(L/s)": round(curve_df["f"].min(), 2),
+            "日均流量(m³/d)": round(daily_avg_flow * 86.4, 2),  # L/s -> m³/d
+            "日最大流量(L/s)": round(daily_max_flow, 2),
+            "日最小流量(L/s)": round(daily_min_flow, 2),
             "最大液位(m)": round(flow_df["l"].max(), 2) if "l" in flow_df.columns else 0,
             "最大充满度": round(flow_df["l"].max() / diameter * 1000, 2) if diameter > 0 else 0,
             "外溢风险": round(flow_df["l"].max() / depth, 2) if depth > 0 else 0,
